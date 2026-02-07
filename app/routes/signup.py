@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import logging
 
 import httpx
@@ -10,6 +12,32 @@ from app.db import get_pool
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def make_session_token(user_id: str) -> str:
+    sig = hmac.new(
+        settings.signing_secret.encode(), user_id.encode(), hashlib.sha256
+    ).hexdigest()[:16]
+    return f"{user_id}:{sig}"
+
+
+def verify_session_token(token: str) -> str | None:
+    if not token or ":" not in token:
+        return None
+    user_id, sig = token.rsplit(":", 1)
+    expected = hmac.new(
+        settings.signing_secret.encode(), user_id.encode(), hashlib.sha256
+    ).hexdigest()[:16]
+    if hmac.compare_digest(sig, expected):
+        return user_id
+    return None
+
+
+def get_user_id(request: Request) -> str | None:
+    token = request.cookies.get("session")
+    if token:
+        return verify_session_token(token)
+    return None
 
 
 # Step 1: Redirect to GitHub OAuth
@@ -83,14 +111,28 @@ async def github_callback(code: str):
         primary_email,
     )
 
-    # Redirect to setup page with user_id in a signed session
-    # For MVP, pass user_id directly (TODO: proper session management)
-    return RedirectResponse(f"/setup?user_id={user['id']}")
+    user_id = str(user["id"])
+
+    # Check if user already has agents → dashboard, otherwise → setup
+    agent_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM agents WHERE user_id = $1", user_id
+    )
+    dest = "/account" if agent_count > 0 else "/setup"
+
+    response = RedirectResponse(dest, status_code=303)
+    response.set_cookie(
+        "session", make_session_token(user_id),
+        httponly=True, secure=True, samesite="lax", max_age=86400 * 30,
+    )
+    return response
 
 
 # Step 3: Setup page — pick agent address, set allowed contact
 @router.get("/setup", response_class=HTMLResponse)
-async def setup_page(user_id: str):
+async def setup_page(request: Request):
+    user_id = get_user_id(request)
+    if not user_id:
+        return RedirectResponse("/auth/github")
     return f"""<!DOCTYPE html>
 <html><head><title>Sixel-Mail Setup</title>
 <style>
@@ -104,7 +146,6 @@ async def setup_page(user_id: str):
 <h1>sixel.email</h1>
 <h2>Set up your agent</h2>
 <form method="POST" action="/setup">
-    <input type="hidden" name="user_id" value="{user_id}">
     <label>Agent address:</label><br>
     <input type="text" name="address" placeholder="my-agent" pattern="[a-z0-9\\-]{{3,30}}" required>
     <span class="suffix">@sixel.email</span><br><br>
@@ -118,8 +159,10 @@ async def setup_page(user_id: str):
 # Step 4: Create agent
 @router.post("/setup")
 async def create_agent(request: Request):
+    user_id = get_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not logged in")
     form = await request.form()
-    user_id = form["user_id"]
     address = form["address"].lower().strip()
     allowed_contact = form["allowed_contact"].strip()
 
@@ -172,12 +215,15 @@ async def create_agent(request: Request):
 
 # Step 5: Top-up page (pre-payment + shows API key after payment)
 @router.get("/topup", response_class=HTMLResponse)
-async def topup_page(agent_id: str, api_key: str = ""):
+async def topup_page(request: Request, agent_id: str, api_key: str = ""):
+    user_id = get_user_id(request)
+    if not user_id:
+        return RedirectResponse("/auth/github")
     pool = await get_pool()
     agent = await pool.fetchrow(
-        "SELECT address, credit_balance FROM agents WHERE id = $1", agent_id
+        "SELECT address, credit_balance, user_id FROM agents WHERE id = $1", agent_id
     )
-    if not agent:
+    if not agent or str(agent["user_id"]) != user_id:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     key_section = ""

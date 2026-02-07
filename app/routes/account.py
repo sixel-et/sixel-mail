@@ -1,14 +1,17 @@
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.db import get_pool
+from app.routes.signup import get_user_id
 
 router = APIRouter()
 
 
 @router.get("/account", response_class=HTMLResponse)
-async def account_page(user_id: str):
-    # TODO: proper session auth instead of passing user_id
+async def account_page(request: Request):
+    user_id = get_user_id(request)
+    if not user_id:
+        return RedirectResponse("/auth/github")
     pool = await get_pool()
 
     user = await pool.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
@@ -89,5 +92,5 @@ async def account_page(user_id: str):
 <p>{user['github_username']} ({user['email']})</p>
 {agent_sections}
 <br>
-<a href="/setup?user_id={user_id}"><button>+ Create another agent</button></a>
+<a href="/setup"><button>+ Create another agent</button></a>
 </body></html>"""

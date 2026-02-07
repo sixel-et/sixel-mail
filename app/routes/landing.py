@@ -79,7 +79,7 @@ POST  /v1/rotate-key   Rotate the API key</pre>
 
 <p class="price">$0.01 per message. Polling is free. No subscription.</p>
 
-<a href="/auth/github" class="cta">Sign up with GitHub</a>
+<a href="/auth/github" class="cta">Sign up / Log in with GitHub</a>
 
 <div class="footer">
     <p>Built by <a href="https://github.com/sixel-et">sixel-et</a></p>
