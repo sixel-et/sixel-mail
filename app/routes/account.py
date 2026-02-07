@@ -1,3 +1,5 @@
+import html
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
@@ -22,10 +24,12 @@ async def account_page(request: Request):
         "SELECT * FROM agents WHERE user_id = $1 ORDER BY created_at", user_id
     )
 
+    esc = html.escape
+
     agent_sections = ""
     for agent in agents:
         agent_id = str(agent["id"])
-        address = agent["address"]
+        address = esc(agent["address"])
         last_seen = agent["last_seen_at"]
         last_seen_str = last_seen.strftime("%I:%M%p %Z") if last_seen else "never"
         status = "alive" if not agent["agent_down_notified"] else "OFFLINE"
@@ -35,7 +39,7 @@ async def account_page(request: Request):
             "SELECT key_prefix FROM api_keys WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 1",
             agent["id"],
         )
-        key_display = f"{key_row['key_prefix']}..." if key_row else "none"
+        key_display = f"{esc(key_row['key_prefix'])}..." if key_row else "none"
 
         # Recent messages
         messages = await pool.fetch(
@@ -49,7 +53,7 @@ async def account_page(request: Request):
         for msg in messages:
             arrow = "→" if msg["direction"] == "outbound" else "←"
             time_str = msg["created_at"].strftime("%I:%M%p")
-            subj = msg["subject"] or "(no subject)"
+            subj = esc(msg["subject"] or "(no subject)")
             msg_lines += f'    {arrow} "{subj}" ({time_str})<br>\n'
 
         # Credit transactions
@@ -64,13 +68,13 @@ async def account_page(request: Request):
         for txn in txns:
             date_str = txn["created_at"].strftime("%b %d")
             amount_dollars = txn["amount"] / 100
-            txn_lines += f"  {date_str} — ${amount_dollars:.2f} ({txn['amount']} messages) — {txn['reason']}<br>\n"
+            txn_lines += f"  {date_str} — ${amount_dollars:.2f} ({txn['amount']} messages) — {esc(txn['reason'])}<br>\n"
 
         agent_sections += f"""
 <div style="border: 1px solid #ccc; padding: 16px; margin: 16px 0;">
     <h3>{address}@sixel.email</h3>
     <p>Status: {status} (last seen: {last_seen_str})</p>
-    <p>Allowed contact: {agent['allowed_contact']}</p>
+    <p>Allowed contact: {esc(agent['allowed_contact'])}</p>
     <p>Credits: {agent['credit_balance']} messages</p>
     <p>API key: <code>{key_display}</code></p>
     <p><strong>Recent messages:</strong></p>
@@ -89,7 +93,7 @@ async def account_page(request: Request):
 </style></head>
 <body>
 <h1>sixel.email — your account</h1>
-<p>{user['github_username']} ({user['email']})</p>
+<p>{esc(user['github_username'])} ({esc(user['email'])})</p>
 {agent_sections}
 <br>
 <a href="/setup"><button>+ Create another agent</button></a>
