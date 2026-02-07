@@ -1,4 +1,6 @@
 import base64
+import email
+import email.policy
 import json
 import logging
 import re
@@ -71,6 +73,31 @@ async def _verify_sns_signature(message: dict) -> bool:
         return False
 
 
+def _extract_text_body(raw_email: str) -> str:
+    """Extract the text/plain body from a raw email string."""
+    msg = email.message_from_string(raw_email, policy=email.policy.default)
+
+    # Walk MIME parts, prefer text/plain
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                payload = part.get_content()
+                if isinstance(payload, str):
+                    return payload
+        # Fallback: try text/html
+        for part in msg.walk():
+            if part.get_content_type() == "text/html":
+                payload = part.get_content()
+                if isinstance(payload, str):
+                    return payload
+    else:
+        payload = msg.get_content()
+        if isinstance(payload, str):
+            return payload
+
+    return "(no body)"
+
+
 async def _store_inbound(pool, agent_address: str, from_addr: str, subject: str, body: str):
     """Validate and store an inbound email message."""
     agent = await pool.fetchrow(
@@ -132,34 +159,57 @@ async def ses_inbound(request: Request):
     if msg_type != "Notification":
         return {"status": "ignored"}
 
-    # Parse the SES notification from the SNS message
+    # The SNS message may be base64 (raw email) or JSON (SES notification)
+    raw_message = body.get("Message", "")
+
+    # Try to parse as JSON first (SES notification format)
     try:
-        ses_message = json.loads(body["Message"])
-    except (json.JSONDecodeError, KeyError):
-        raise HTTPException(status_code=400, detail="Invalid SES message")
+        ses_message = json.loads(raw_message)
+        # SES JSON notification — extract metadata and raw content
+        mail_obj = ses_message.get("mail", {})
+        receipt = ses_message.get("receipt", {})
+        recipients = receipt.get("recipients", mail_obj.get("destination", []))
+        from_addr = mail_obj.get("source", "")
 
-    # Extract email details from SES notification
-    mail = ses_message.get("mail", {})
-    receipt = ses_message.get("receipt", {})
-    recipients = receipt.get("recipients", mail.get("destination", []))
+        subject = ""
+        for header in mail_obj.get("headers", []):
+            if header["name"].lower() == "subject":
+                subject = header["value"]
+                break
 
-    from_addr = mail.get("source", "")
-    subject = ""
-    for header in mail.get("headers", []):
-        if header["name"].lower() == "subject":
-            subject = header["value"]
-            break
+        # If content field has the raw email, parse it
+        raw_email = ses_message.get("content", "")
+        if raw_email:
+            text_body = _extract_text_body(raw_email)
+        else:
+            text_body = "(no body)"
 
-    # Get email body from the content field if available
-    content = ses_message.get("content", "")
+    except (json.JSONDecodeError, ValueError):
+        # Base64-encoded raw email (when SNS encoding is Base64)
+        try:
+            raw_email = base64.b64decode(raw_message).decode("utf-8", errors="replace")
+        except Exception:
+            raise HTTPException(status_code=400, detail="Could not decode message")
+
+        msg = email.message_from_string(raw_email, policy=email.policy.default)
+        from_addr = msg.get("From", "")
+        subject = msg.get("Subject", "")
+        recipients = [addr.strip() for addr in (msg.get("To", "")).split(",")]
+        text_body = _extract_text_body(raw_email)
+
+        # Extract just the email address from "Name <addr>" format
+        if "<" in from_addr and ">" in from_addr:
+            from_addr = from_addr.split("<")[1].split(">")[0]
 
     pool = await get_pool()
 
     # Process for each recipient (usually just one)
     for recipient in recipients:
-        # Extract agent address from recipient (strip @domain)
+        # Clean up recipient if in "Name <addr>" format
+        if "<" in recipient and ">" in recipient:
+            recipient = recipient.split("<")[1].split(">")[0]
         local_part = recipient.split("@")[0].lower()
-        await _store_inbound(pool, local_part, from_addr, subject, content)
+        await _store_inbound(pool, local_part, from_addr, subject, text_body)
 
     return {"status": "processed"}
 
