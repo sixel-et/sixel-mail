@@ -207,15 +207,39 @@ async def create_agent(request: Request):
         key_prefix,
     )
 
-    # Redirect to payment page with agent info
-    return RedirectResponse(
-        f"/topup?agent_id={agent_id}&api_key={key}", status_code=303
+    # Render key display page directly (never put API key in a URL)
+    config_snippet = (
+        f"You have an email address for contacting me when you're stuck.\\n"
+        f"API: {settings.api_base_url}/v1\\n"
+        f"Token: {key}\\n"
+        f"Use POST /v1/send to email me. Use GET /v1/inbox to check for my reply.\\n"
+        f"Poll /v1/inbox every 60 seconds while waiting."
     )
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html><head><title>Sixel-Mail - Agent Created</title>
+<style>
+    body {{ font-family: monospace; max-width: 600px; margin: 40px auto; padding: 0 20px; }}
+    button {{ font-family: monospace; font-size: 16px; cursor: pointer; background: #000; color: #fff; border: none; padding: 10px 20px; margin: 8px 4px; }}
+    code, pre {{ background: #f0f0f0; padding: 2px 6px; }}
+    pre {{ white-space: pre-wrap; padding: 12px; }}
+</style></head>
+<body>
+<h1>sixel.email</h1>
+<h2>{address}@sixel.email</h2>
+<div style="background: #f0f0f0; padding: 16px; margin: 16px 0;">
+    <strong>Your API key (shown once, save it now):</strong><br>
+    <code>{key}</code><br><br>
+    <strong>Paste this into your agent config:</strong><br>
+    <pre>{config_snippet}</pre>
+</div>
+<a href="/topup?agent_id={agent_id}"><button>Add credit</button></a>
+<a href="/account"><button>Go to dashboard</button></a>
+</body></html>""")
 
 
-# Step 5: Top-up page (pre-payment + shows API key after payment)
+# Step 5: Top-up page (credits only, no key display)
 @router.get("/topup", response_class=HTMLResponse)
-async def topup_page(request: Request, agent_id: str, api_key: str = ""):
+async def topup_page(request: Request, agent_id: str):
     user_id = get_user_id(request)
     if not user_id:
         return RedirectResponse("/auth/github")
@@ -225,23 +249,6 @@ async def topup_page(request: Request, agent_id: str, api_key: str = ""):
     )
     if not agent or str(agent["user_id"]) != user_id:
         raise HTTPException(status_code=404, detail="Agent not found")
-
-    key_section = ""
-    if api_key:
-        config_snippet = (
-            f"You have an email address for contacting me when you're stuck.\\n"
-            f"API: {settings.api_base_url}/v1\\n"
-            f"Token: {api_key}\\n"
-            f"Use POST /v1/send to email me. Use GET /v1/inbox to check for my reply.\\n"
-            f"Poll /v1/inbox every 60 seconds while waiting."
-        )
-        key_section = f"""
-        <div style="background: #f0f0f0; padding: 16px; margin: 16px 0;">
-            <strong>Your API key (shown once, save it now):</strong><br>
-            <code id="apikey">{api_key}</code><br><br>
-            <strong>Paste this into your agent config:</strong><br>
-            <pre id="config">{config_snippet}</pre>
-        </div>"""
 
     stripe_button = ""
     if settings.stripe_secret_key:
@@ -267,9 +274,9 @@ async def topup_page(request: Request, agent_id: str, api_key: str = ""):
 <h1>sixel.email</h1>
 <h2>{agent['address']}@sixel.email</h2>
 <p>Credits: {agent['credit_balance']} messages</p>
-{key_section}
 <h3>Add credit</h3>
 {stripe_button}
+<br><a href="/account"><button>Back to dashboard</button></a>
 </body></html>"""
 
 
