@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.auth import get_agent_id
+from app.auth import generate_api_key, get_agent_id
 from app.config import settings
 from app.db import get_pool
 from app.services.credits import deduct_credit
@@ -169,3 +169,26 @@ async def get_message(message_id: str, agent_id: str = Depends(get_agent_id)):
         body=row["body"],
         received_at=row["created_at"].isoformat(),
     )
+
+
+# POST /v1/rotate-key
+@router.post("/rotate-key")
+async def rotate_key(agent_id: str = Depends(get_agent_id)):
+    pool = await get_pool()
+
+    # Generate new key
+    key, key_hash, key_prefix = generate_api_key()
+
+    # Delete old keys, insert new one
+    await pool.execute("DELETE FROM api_keys WHERE agent_id = $1", agent_id)
+    await pool.execute(
+        "INSERT INTO api_keys (agent_id, key_hash, key_prefix) VALUES ($1, $2, $3)",
+        agent_id,
+        key_hash,
+        key_prefix,
+    )
+
+    return {
+        "api_key": key,
+        "message": "Old key has been invalidated. Store this key — it won't be shown again.",
+    }
