@@ -178,8 +178,14 @@ async def ses_inbound(request: Request):
                 break
 
         # If content field has the raw email, parse it
-        raw_email = ses_message.get("content", "")
-        if raw_email:
+        # Content may be base64-encoded (when SNS encoding is Base64)
+        raw_content = ses_message.get("content", "")
+        if raw_content:
+            # Try base64 decode first
+            try:
+                raw_email = base64.b64decode(raw_content).decode("utf-8", errors="replace")
+            except Exception:
+                raw_email = raw_content
             text_body = _extract_text_body(raw_email)
         else:
             text_body = "(no body)"
