@@ -1,18 +1,32 @@
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.auth import generate_api_key, get_agent_id
 from app.config import settings
 from app.db import get_pool
+from app.ratelimit import POLL_LIMIT, POLL_WINDOW, SEND_LIMIT, SEND_WINDOW, limiter
 from app.services.credits import deduct_credit
 from app.services.email import build_footer, send_email
 
 router = APIRouter(prefix="/v1")
 
 
+MAX_BODY_LENGTH = 100_000  # 100KB
+
+
 class SendRequest(BaseModel):
     subject: str = ""
     body: str
+
+    @field_validator("body")
+    @classmethod
+    def body_not_empty(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Body cannot be empty")
+        if len(v) > MAX_BODY_LENGTH:
+            raise ValueError(f"Body exceeds maximum length of {MAX_BODY_LENGTH} characters")
+        return v
 
 
 class SendResponse(BaseModel):
@@ -37,6 +51,13 @@ class InboxResponse(BaseModel):
 # POST /v1/send
 @router.post("/send", response_model=SendResponse)
 async def send_message(req: SendRequest, agent_id: str = Depends(get_agent_id)):
+    if not limiter.check(f"send:{agent_id}", SEND_LIMIT, SEND_WINDOW):
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "rate_limited", "limit": f"{SEND_LIMIT} messages/day",
+                    "retry_after": "try again later"},
+        )
+
     pool = await get_pool()
 
     agent = await pool.fetchrow(
@@ -89,6 +110,13 @@ async def send_message(req: SendRequest, agent_id: str = Depends(get_agent_id)):
 # GET /v1/inbox
 @router.get("/inbox", response_model=InboxResponse)
 async def get_inbox(agent_id: str = Depends(get_agent_id)):
+    if not limiter.check(f"poll:{agent_id}", POLL_LIMIT, POLL_WINDOW):
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "rate_limited", "limit": f"{POLL_LIMIT} polls/min",
+                    "retry_after": "slow down polling interval"},
+        )
+
     pool = await get_pool()
 
     # Update heartbeat
@@ -102,7 +130,7 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
 
     # Check if agent was marked down, send recovery notification
     agent = await pool.fetchrow(
-        "SELECT credit_balance, agent_down_notified FROM agents WHERE id = $1",
+        "SELECT address, allowed_contact, credit_balance, agent_down_notified FROM agents WHERE id = $1",
         agent_id,
     )
     if agent["agent_down_notified"]:
@@ -110,7 +138,12 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
             "UPDATE agents SET agent_down_notified = FALSE WHERE id = $1",
             agent_id,
         )
-        # TODO: send "agent is back" email
+        await send_email(
+            from_address=f"{agent['address']}@{settings.mail_domain}",
+            to_address=agent["allowed_contact"],
+            subject=f"[{agent['address']}] is back online",
+            body=f"Your agent {agent['address']}@{settings.mail_domain} is responding again.",
+        )
 
     # Fetch unread inbound messages
     rows = await pool.fetch(
