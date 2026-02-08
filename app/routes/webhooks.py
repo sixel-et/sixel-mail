@@ -98,6 +98,42 @@ def _extract_text_body(raw_email: str) -> str:
     return "(no body)"
 
 
+def _check_email_auth(receipt: dict) -> tuple[bool, str]:
+    """Check SPF/DKIM/DMARC verdicts from SES receipt.
+
+    Returns (accepted, warning) where accepted is False if the email
+    should be rejected, and warning is a string to prepend to the body
+    if there are soft failures.
+    """
+    spf = receipt.get("spfVerdict", {}).get("status", "")
+    dkim = receipt.get("dkimVerdict", {}).get("status", "")
+    dmarc = receipt.get("dmarcVerdict", {}).get("status", "")
+
+    # Hard reject: DKIM or DMARC explicitly failed
+    if dkim == "FAIL":
+        logger.warning("Rejected inbound: DKIM FAIL")
+        return False, ""
+    if dmarc == "FAIL":
+        logger.warning("Rejected inbound: DMARC FAIL")
+        return False, ""
+
+    # Soft failures: warn but accept
+    warnings = []
+    if spf != "PASS":
+        warnings.append(f"SPF: {spf}")
+    if dkim != "PASS":
+        warnings.append(f"DKIM: {dkim}")
+    if dmarc != "PASS":
+        warnings.append(f"DMARC: {dmarc}")
+
+    if warnings:
+        warning_text = "[WARNING: Email authentication incomplete — " + ", ".join(warnings) + "]\n\n"
+        logger.info("Inbound email auth soft-fail: %s", ", ".join(warnings))
+        return True, warning_text
+
+    return True, ""
+
+
 async def _store_inbound(pool, agent_address: str, from_addr: str, subject: str, body: str):
     """Validate and store an inbound email message."""
     agent = await pool.fetchrow(
@@ -163,11 +199,18 @@ async def ses_inbound(request: Request):
     raw_message = body.get("Message", "")
 
     # Try to parse as JSON first (SES notification format)
+    auth_warning = ""
     try:
         ses_message = json.loads(raw_message)
         # SES JSON notification — extract metadata and raw content
         mail_obj = ses_message.get("mail", {})
         receipt = ses_message.get("receipt", {})
+
+        # Verify SPF/DKIM/DMARC before processing
+        accepted, auth_warning = _check_email_auth(receipt)
+        if not accepted:
+            return {"status": "rejected", "reason": "email_auth_failed"}
+
         recipients = receipt.get("recipients", mail_obj.get("destination", []))
         from_addr = mail_obj.get("source", "")
 
@@ -192,6 +235,7 @@ async def ses_inbound(request: Request):
 
     except (json.JSONDecodeError, ValueError):
         # Base64-encoded raw email (when SNS encoding is Base64)
+        # No SES receipt metadata available — cannot verify email auth
         try:
             raw_email = base64.b64decode(raw_message).decode("utf-8", errors="replace")
         except Exception:
@@ -206,6 +250,14 @@ async def ses_inbound(request: Request):
         # Extract just the email address from "Name <addr>" format
         if "<" in from_addr and ">" in from_addr:
             from_addr = from_addr.split("<")[1].split(">")[0]
+
+        # No SES auth data — prepend warning
+        auth_warning = "[WARNING: Email authentication could not be verified]\n\n"
+        logger.warning("Inbound email without SES auth metadata from %s", from_addr)
+
+    # Prepend auth warning to body if present
+    if auth_warning:
+        text_body = auth_warning + text_body
 
     pool = await get_pool()
 

@@ -751,11 +751,30 @@ app = "sixel-mail"
 
 The most subtle risk. Email `From:` headers are trivially forgeable. An attacker could send fake replies to the agent — effectively prompt injection via email.
 
+### Layer 1: Spoofed sender (protectable)
+
+Someone forges the allowed contact's email address. The email didn't come from the contact's mail provider at all. SPF/DKIM/DMARC catch this because the sending server isn't authorized for that domain.
+
 Mitigations (layered):
 1. **SPF/DKIM/DMARC verification.** SES provides auth results. Reject hard fails.
 2. **Warning on soft-fail.** Prepend warning to message body.
 3. **Reply-chain validation (later).** Only accept replies to previous outbound messages.
 4. **Documentation.** Tell developers: treat email replies like user input.
+
+### Layer 2: Compromised sender account (not protectable by us)
+
+If the allowed contact's email account is compromised (stolen password, session hijack, compromised device), the attacker sends email that passes every authentication check because it IS legitimately sent through the contact's mail provider. SPF passes. DKIM passes. DMARC passes. To the agent, it's indistinguishable from the real person.
+
+This matters more here than in most systems because:
+- The "one allowed contact" design creates implicit high trust. The agent (and the developer building on the agent) assumes the identity of the sender. The channel feels private and verified.
+- The simplicity of the system buries this assumption. There's no visible authentication ceremony, no login screen, no MFA prompt. Email arrives, it's from the right address, it's trusted. The intimacy of the channel makes the trust assumption invisible.
+- AI agents may act on email instructions with less skepticism than a human would. A human might notice something "off" about a message from a compromised account. An agent follows instructions.
+
+We cannot solve this. It is the same boundary every email-dependent system operates at. But we should:
+1. **Document it explicitly** for developers building on sixel-mail. "Your agent's allowed contact is an email address, not a verified identity. If that email account is compromised, your agent will follow instructions from the attacker."
+2. **Recommend 2FA on the contact's email account** in onboarding/docs.
+3. **Consider optional confirmation flows for high-stakes actions** — e.g., agent emails "You asked me to delete all data. Reply CONFIRM to proceed." This doesn't prevent the attack but adds friction.
+4. **Log everything.** If a compromise is detected after the fact, full message history enables damage assessment.
 
 ## Payment Security
 

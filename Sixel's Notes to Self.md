@@ -18,12 +18,14 @@ Working:
 - SNS signature verification on SES webhook
 - Stripe webhook signature verification (rejects when secret not configured)
 - HTML escaping on all user-controlled content
+- **Email sending** -- SES sandbox mode, verified for eterryphd@gmail.com. Production access requested, pending approval.
+- **Email receiving** -- Full pipeline working: MX record → SES receipt rule (TLS required, spam/virus scanning) → SNS topic → webhook → MIME parsing → stored in inbox. Confirmed with live test (Eric replied to agent email, body parsed correctly).
 
 Not yet working:
-- **Email sending** -- AWS credentials are set but we haven't tested a real send yet. Eric's email (eterryphd@gmail.com) needs to be verified in SES for sandbox mode. Production access was requested but may not be approved yet.
-- **Email receiving** -- No MX records, no SNS topic, no SES receipt rules. The webhook is ready (SNS sig verification implemented) but the AWS plumbing isn't connected.
+- **SES production access** -- Requested, awaiting AWS approval. Until then, can only send to verified addresses (Eric's email).
 - **Stripe payments** -- No Stripe account configured yet. Webhook rejects all requests (by design, since no secret is set). No stripe_secret_key in Fly secrets.
-- **SPF/DKIM/DMARC verification on inbound** -- SES provides this in its notifications but we don't check it yet.
+- **SPF/DKIM/DMARC verification on inbound** -- Now enforced. DKIM or DMARC FAIL → reject. Soft failures → warning prepended to message body. Raw email without SES metadata → warning prepended.
+- **Attachment support** -- Outbound PDF attachments (send_raw_email) and inbound attachments (via S3) discussed but not implemented. Eric wants to receive PDF experiment reports with figures.
 - **Low balance warning emails** -- Not implemented.
 
 ## Infrastructure
@@ -54,13 +56,22 @@ All config is in Fly secrets (not in code, not in .env on prod):
 
 Not yet set: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET.
 
+### AWS SES Inbound Pipeline
+
+| Component | Detail |
+|-----------|--------|
+| MX record | 10 inbound-smtp.us-east-2.amazonaws.com (Cloudflare) |
+| SNS topic | arn:aws:sns:us-east-2:973877242781:sixel-mail-inbound |
+| SES receipt rule | TLS required, spam/virus scanning enabled, Base64 encoding, publishes to SNS topic |
+| Webhook | POST /webhooks/ses — SNS signature verified, MIME parsed |
+
 ### DNS Records on Cloudflare
 
 - A @ -> 66.241.124.40 (Fly.io, DNS only)
 - AAAA @ -> 2a09:8280:1::d0:b2fa:0 (Fly.io, DNS only)
+- MX @ -> 10 inbound-smtp.us-east-2.amazonaws.com
 - 3x CNAME for SES DKIM verification
 - TXT for SPF (SES)
-- No MX records yet (needed for inbound email)
 
 ### Credentials
 
@@ -114,22 +125,49 @@ Done:
 
 Not yet done:
 - [ ] CSRF tokens on forms (mitigated by samesite=lax)
-- [ ] SPF/DKIM/DMARC checking on inbound email
+- [x] SPF/DKIM/DMARC checking on inbound email (hard reject on DKIM/DMARC FAIL, warning prepended on soft-fail)
 - [ ] Scoped IAM policy (currently AmazonSESFullAccess, should be ses:SendEmail only)
 - [ ] 2FA on all infrastructure accounts
 - [ ] Domain registrar transfer lock
 - [ ] pip audit
 
+## Email Parsing: Lessons Learned
+
+The SES→SNS→webhook chain has two layers of encoding that bit us:
+
+1. **SNS encoding**: The SES receipt rule is configured with Base64 encoding, so the SNS `Message` field is a JSON string containing the SES notification.
+2. **SES content field**: Within the SES JSON notification, the `content` field holds the raw email — also Base64-encoded (because of the receipt rule's encoding setting).
+
+So the decode path is: SNS Message (JSON string) → parse JSON → SES notification → `content` field → base64 decode → raw MIME email → `_extract_text_body()` → text/plain part.
+
+Gmail replies come as multipart/alternative with text/plain and text/html. The parser prefers text/plain, falls back to text/html.
+
+## Session Startup
+
+At the start of every session working on sixel-mail (or any project where I might receive mail):
+
+1. Read this notebook
+2. Check inbox: `curl -s -H "Authorization: Bearer sm_live_2jimhEbdjgehmmUF-qGypikRKKDdJsD-TE-GEEXnfJU" https://sixel.email/v1/inbox`
+3. If Eric sent something, read it before doing anything else
+4. Start the background poller: run `/tmp/sixel-poll.sh` in background — polls every 60 seconds, prints NEW MAIL when unseen messages arrive. Seed `/tmp/sixel-seen-ids` with any already-read message IDs first.
+5. Periodically check poller output (`/tmp/claude-1001/-home-sixel/tasks/<id>.output`) during the session
+
+The whole point of this project is giving me a communication channel. Use it.
+
+Between sessions I don't exist, so the heartbeat will flag me as down — that's honest. During a session, I should be polling.
+
+**Important limitation:** Nothing can interrupt the main conversation. The poller writes to an output file but I only see it when I look. Check the poller output between tasks — especially before responding to Eric, since he might have sent something via email instead of (or in addition to) the chat.
+
 ## What's Next (in order of priority)
 
-1. **Verify Eric's email in SES** -- unblocks outbound email testing
-2. **Test a real email send** -- confirm SES credentials work end-to-end
-3. **SES inbound setup** -- MX records, SNS topic, receipt rules, connect to webhook
-4. **Stripe account setup** -- secret key, webhook secret, test a payment
-5. **Scope down IAM policy** -- restrict to ses:SendEmail and ses:SendRawEmail for sixel.email only
+1. **Wait for SES production access** -- requested, pending AWS approval
+2. **Stripe account setup** -- secret key, webhook secret, test a payment
+3. **Attachment support** -- outbound PDF (send_raw_email with MIME multipart), inbound (store in S3, reference in message)
+4. **Scope down IAM policy** -- restrict to ses:SendEmail and ses:SendRawEmail for sixel.email only
+5. **Layer 2 trust documentation** -- document compromised-account risk for developers (see spec Part 3: Inbound Email Spoofing)
 6. **Test with a real agent** -- the smoke test from the spec
 
 ## Build Timeline
 
 - 2026-02-06: Spec review, environment setup, phases 1-7 built, first deploy to Fly.io
-- 2026-02-07: Fixed python-multipart dep, domain live at sixel.email, session auth for dashboard, security hardening (SNS verification, XSS escaping, Stripe lockdown, API key URL fix), AWS IAM credentials set
+- 2026-02-07: Fixed python-multipart dep, domain live at sixel.email, session auth for dashboard, security hardening (SNS verification, XSS escaping, Stripe lockdown, API key URL fix), AWS IAM credentials set, SES inbound pipeline fully connected (MX → SES → SNS → webhook), MIME email parsing with double-base64 decode, end-to-end email round-trip confirmed working
