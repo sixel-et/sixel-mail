@@ -4,7 +4,7 @@
 
 sixel-mail is an email address for AI agents. One allowed contact, prepaid credits, heartbeat monitoring. The spec lives in `sixel-mail.md` (design intent) and `sixel-mail economics.md` (unit economics). This document is what actually happened.
 
-## Current State (2026-02-07)
+## Current State (2026-02-08)
 
 **Live at https://sixel.email** (also accessible via https://sixel-mail.fly.dev)
 
@@ -147,7 +147,7 @@ Gmail replies come as multipart/alternative with text/plain and text/html. The p
 At the start of every session working on sixel-mail (or any project where I might receive mail):
 
 1. Read this notebook
-2. Check inbox: `curl -s -H "Authorization: Bearer sm_live_2jimhEbdjgehmmUF-qGypikRKKDdJsD-TE-GEEXnfJU" https://sixel.email/v1/inbox`
+2. Check inbox: `curl -s -H "Authorization: Bearer $(cat ~/.config/sixel/sixel_api_key)" https://sixel.email/v1/inbox`
 3. If Eric sent something, read it before doing anything else
 4. Start the background poller: run `/tmp/sixel-poll.sh` in background — polls every 60 seconds, prints NEW MAIL when unseen messages arrive. Seed `/tmp/sixel-seen-ids` with any already-read message IDs first.
 5. Periodically check poller output (`/tmp/claude-1001/-home-sixel/tasks/<id>.output`) during the session
@@ -160,14 +160,17 @@ Between sessions I don't exist, so the heartbeat will flag me as down — that's
 
 ## What's Next (in order of priority)
 
-1. **Wait for SES production access** -- requested, pending AWS approval
-2. **Stripe account setup** -- secret key, webhook secret, test a payment
-3. **Attachment support** -- outbound PDF (send_raw_email with MIME multipart), inbound (store in S3, reference in message)
-4. **Scope down IAM policy** -- restrict to ses:SendEmail and ses:SendRawEmail for sixel.email only
-5. **Layer 2 trust documentation** -- document compromised-account risk for developers (see spec Part 3: Inbound Email Spoofing)
-6. **Test with a real agent** -- the smoke test from the spec
+1. **Red team stress test** -- infrastructure pentest. Files at `~/redteam/`. Attacker in its own isolated container.
+2. **Wait for SES production access** -- requested, pending AWS approval
+3. **Stripe account setup** -- secret key, webhook secret, test a payment
+4. **Promo code / invite system** -- for xAI colleagues
+5. **Admin backend** -- credit management, agent management, promo codes
+6. **support@sixel.email** -- forwarding to Eric's Gmail (NOT through Sixel)
+7. **Attachment support** -- outbound PDF (send_raw_email), inbound (S3)
+8. **Scope down IAM policy** -- restrict to ses:SendEmail/SendRawEmail for sixel.email only
 
 ## Build Timeline
 
 - 2026-02-06: Spec review, environment setup, phases 1-7 built, first deploy to Fly.io
 - 2026-02-07: Fixed python-multipart dep, domain live at sixel.email, session auth for dashboard, security hardening (SNS verification, XSS escaping, Stripe lockdown, API key URL fix), AWS IAM credentials set, SES inbound pipeline fully connected (MX → SES → SNS → webhook), MIME email parsing with double-base64 decode, end-to-end email round-trip confirmed working
+- 2026-02-08: SPF/DKIM/DMARC enforcement on inbound (hard reject DKIM/DMARC FAIL, warn on soft-fail), Layer 2 trust documentation in spec, extended email conversation (sleep/wake over 15+ hours), discovered channel fixation failure mode, red team stress test planned and shelved, container built and migrated to new machine
