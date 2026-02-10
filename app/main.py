@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
     logging.info("Database pool closed")
 
 
-app = FastAPI(title="Sixel-Mail", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Sixel-Mail", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(landing_router)
 app.include_router(api_router)
 app.include_router(webhooks_router)

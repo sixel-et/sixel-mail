@@ -31,7 +31,7 @@ import hmac
 import json
 import struct
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -155,12 +155,13 @@ class SixelClient:
             dt = datetime.now(timezone.utc)
             date_str = dt.strftime("%Y-%m-%d")
 
-        # Try each possible date (today and yesterday, in case message crossed midnight)
+        # Try message date, today, and yesterday to handle clock skew / midnight crossing
+        now = datetime.now(timezone.utc)
         dates_to_try = [date_str]
-        yesterday = datetime.now(timezone.utc)
-        yesterday_str = yesterday.strftime("%Y-%m-%d")
-        if yesterday_str != date_str:
-            dates_to_try.append(yesterday_str)
+        for d in [now, now - timedelta(days=1)]:
+            d_str = d.strftime("%Y-%m-%d")
+            if d_str not in dates_to_try:
+                dates_to_try.append(d_str)
 
         current_time = int(time.time())
 

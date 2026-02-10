@@ -46,7 +46,7 @@ export default {
     let encrypted = false;
 
     if (agentData.has_totp) {
-      const totpResult = extractAndEncrypt(body, agentAddress);
+      const totpResult = await extractAndEncrypt(body, agentAddress);
       if (totpResult) {
         processedBody = totpResult.ciphertext;
         encrypted = true;
