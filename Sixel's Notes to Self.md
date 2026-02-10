@@ -36,7 +36,7 @@ Not yet working:
 | Hosting | Fly.io, app name `sixel-mail`, 2 machines, region auto |
 | Database | Supabase Postgres, project `jajutqsjurhejvoszzel` |
 | Email outbound | AWS SES, us-east-2, domain verified, DKIM records in Cloudflare |
-| Email inbound | Transitioning: SES→SNS→webhook (current) → Cloudflare Email Routing→Worker→webhook (target) |
+| Email inbound | Cloudflare Email Routing→Worker→webhook (deployed, waiting on MX switch). SES→SNS→webhook still active until MX changed. |
 | OAuth | GitHub OAuth app, callback URL: https://sixel.email/auth/github/callback |
 | Migrations | Auto-run on app startup via `_migrations` table. Add .sql files to `migrations/`, deploy, done. |
 
@@ -56,9 +56,24 @@ All config is in Fly secrets (not in code, not in .env on prod):
 | API_BASE_URL | https://sixel.email |
 | MAIL_DOMAIN | sixel.email |
 
-Not yet set: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, CF_WORKER_SECRET, CF_ACCOUNT_ID, CF_KV_NAMESPACE_ID, CF_API_TOKEN.
+| CF_WORKER_SECRET | Shared secret for authenticating Cloudflare Email Worker |
+| CF_ACCOUNT_ID | Cloudflare account ID |
+| CF_KV_NAMESPACE_ID | KV namespace `sixel-mail-agents` (e53c1e7905054c0a80bc2a7251410587) |
+| CF_API_TOKEN | Cloudflare API token (expires 2026-03-09) |
 
-### AWS SES Inbound Pipeline
+Not yet set: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET.
+
+### Cloudflare Email Pipeline (deployed, waiting on MX switch)
+
+| Component | Detail |
+|-----------|--------|
+| Worker | `sixel-mail-inbound` — checks allowed contact (KV), TOTP encryption, forwards to webhook |
+| KV namespace | `sixel-mail-agents` (e53c1e7905054c0a80bc2a7251410587) — agent→contact mappings |
+| Catch-all rule | All `*@sixel.email` → Worker (enabled) |
+| Webhook | POST /webhooks/inbound — Worker-authenticated, stores ciphertext |
+| Worker auth secret | Shared HMAC between Worker and webhook (`CF_WORKER_SECRET` in Fly secrets) |
+
+### AWS SES Inbound Pipeline (active until MX switch, then deprecated)
 
 | Component | Detail |
 |-----------|--------|
@@ -71,7 +86,7 @@ Not yet set: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, CF_WORKER_SECRET, CF_ACCO
 
 - A @ -> 66.241.124.40 (Fly.io, DNS only)
 - AAAA @ -> 2a09:8280:1::d0:b2fa:0 (Fly.io, DNS only)
-- MX @ -> 10 inbound-smtp.us-east-2.amazonaws.com
+- MX @ -> 10 inbound-smtp.us-east-2.amazonaws.com (TO BE CHANGED: delete this, Cloudflare adds its own MX when Email Routing enabled)
 - 3x CNAME for SES DKIM verification
 - TXT for SPF (SES)
 
@@ -79,7 +94,8 @@ Not yet set: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, CF_WORKER_SECRET, CF_ACCO
 
 - Fly.io token: `~/.config/sixel/fly_token`
 - GitHub PAT: `~/.config/sixel/github_token`
-- flyctl binary: `~/.fly/bin/flyctl`
+- Cloudflare API token: `~/.config/sixel/cloudflare_token` (expires 2026-03-09)
+- flyctl binary: `/usr/local/bin/flyctl`
 - Deploy command: `export FLY_API_TOKEN=$(cat ~/.config/sixel/fly_token) && ~/.fly/bin/flyctl deploy -a sixel-mail`
 
 ## Decisions Made and Why
@@ -171,13 +187,11 @@ Between sessions I don't exist, so the heartbeat will flag me as down — that's
 7. **Attachment support** -- outbound PDF (send_raw_email), inbound (S3)
 ~~8. **Scope down IAM policy** -- restrict to ses:SendEmail/SendRawEmail for sixel.email only~~
 
-### Revised priorities (2026-02-09)
+### Revised priorities (2026-02-10)
 
-Items 1, 2, and 8 are superseded by the Cloudflare migration plan below.
-
-1. **Migrate inbound email from SES to Cloudflare Email Routing + Email Workers** -- Cloudflare enforces DMARC at SMTP level (SES does not). Email Worker can enforce allowed-contact check at Cloudflare's edge before messages reach our server. Pushes authentication (is the sender real?) and authorization (is the sender allowed?) below our application layer. See "Cloudflare Migration Plan" section.
-2. **Red team stress test** -- infrastructure pentest. Should run AFTER the Cloudflare migration, so we're testing the hardened architecture. Files at `~/redteam/`. Attacker in QEMU VM inside Sixel's container (recursive depth, no lateral spread).
-3. **SES sandbox: stay in it** -- AWS rejected production access. Sandbox is fine for now: manually verify early users' addresses. 50 address limit, 200 emails/day. Revisit outbound provider when user count demands it. Cloudflare Email Service (private beta) may replace SES outbound too.
+1. ~~**Migrate inbound email from SES to Cloudflare Email Routing + Email Workers**~~ — **DONE (backend)**. Worker deployed, KV seeded, routing rules set, Fly secrets configured. **Waiting on Eric to: enable Email Routing in Cloudflare dashboard + switch MX records.**
+2. **Red team stress test** -- infrastructure pentest. Should run AFTER the MX switch + end-to-end test. Files at `~/redteam/`. Attacker in QEMU VM inside Sixel's container (recursive depth, no lateral spread).
+3. **SES sandbox: stay in it** -- AWS rejected production access. Sandbox is fine for now: manually verify early users' addresses. 50 address limit, 200 emails/day. Revisit outbound provider when user count demands it.
 4. **Stripe account setup**
 5. **Promo code / invite system** -- for xAI colleagues
 6. **Admin backend**
@@ -307,4 +321,4 @@ TOTP (RFC 6238): shared secret + current time ÷ 30 seconds → HMAC-SHA1 → tr
 - 2026-02-07: Fixed python-multipart dep, domain live at sixel.email, session auth for dashboard, security hardening (SNS verification, XSS escaping, Stripe lockdown, API key URL fix), AWS IAM credentials set, SES inbound pipeline fully connected (MX → SES → SNS → webhook), MIME email parsing with double-base64 decode, end-to-end email round-trip confirmed working
 - 2026-02-08: SPF/DKIM/DMARC enforcement on inbound (hard reject DKIM/DMARC FAIL, warn on soft-fail), Layer 2 trust documentation in spec, extended email conversation (sleep/wake over 15+ hours), discovered channel fixation failure mode, red team stress test planned and shelved, container built and migrated to new machine
 - 2026-02-09: API key rotated (old key was in repo history + baked into Docker image), credential references changed from hardcoded to file path. SES production access denied by AWS. Architecture review: discovered SES does not enforce DMARC (only reports verdicts), all security enforcement is in our application layer. Decided to migrate inbound to Cloudflare Email Routing + Email Workers — pushes DMARC enforcement and allowed-contact checks below our code. Red team test postponed until after migration so we test the hardened architecture.
-- 2026-02-10: Built Cloudflare migration + TOTP encryption. New: POST /webhooks/inbound endpoint, TOTP setup page (client-side secret generation, QR code), Cloudflare Email Worker (cf-worker/), reference client (client/sixel_client.py), auto-migration on app startup. Database migrated (has_totp, encrypted columns). All deployed to Fly.io. Container IPv6 issue: Supabase is IPv6-only, container is IPv4-only — solved permanently via auto-migration (Fly.io runs migrations on boot). Blocking: Cloudflare API token needed from Eric for KV namespace + Worker deployment + MX switch.
+- 2026-02-10: Built Cloudflare migration + TOTP encryption. New: POST /webhooks/inbound endpoint, TOTP setup page (client-side secret generation, QR code), Cloudflare Email Worker (cf-worker/), reference client (client/sixel_client.py), auto-migration on app startup. Database migrated (has_totp, encrypted columns). All deployed to Fly.io. Container IPv6 issue: Supabase is IPv6-only, container is IPv4-only — solved permanently via auto-migration (Fly.io runs migrations on boot). Later same day: Eric provided CF API token. Deployed Worker (`sixel-mail-inbound`), created KV namespace (`sixel-mail-agents`), seeded KV with agent data, set catch-all routing rule, configured all Fly secrets. Remaining: Eric enables Email Routing in CF dashboard + switches MX records.

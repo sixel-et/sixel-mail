@@ -10,7 +10,7 @@ WEBHOOK_URL = "https://sixel.email/webhooks/inbound"
 # Then paste the id here
 [[kv_namespaces]]
 binding = "AGENTS"
-id = ""  # Fill after creating namespace
+id = "e53c1e7905054c0a80bc2a7251410587"
 
 # Secrets (set with: wrangler secret put WORKER_AUTH_SECRET)
 # WORKER_AUTH_SECRET - shared secret for authenticating with our webhook
