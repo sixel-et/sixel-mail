@@ -33,6 +33,8 @@ async def account_page(request: Request):
         last_seen = agent["last_seen_at"]
         last_seen_str = last_seen.strftime("%I:%M%p %Z") if last_seen else "never"
         status = "alive" if not agent["agent_down_notified"] else "OFFLINE"
+        has_totp = agent.get("has_totp", False)
+        totp_badge = ' <span style="background:#28a745;color:#fff;padding:2px 6px;font-size:12px;">TOTP</span>' if has_totp else ""
 
         # Get API key prefix
         key_row = await pool.fetchrow(
@@ -44,7 +46,7 @@ async def account_page(request: Request):
         # Recent messages
         messages = await pool.fetch(
             """
-            SELECT direction, subject, created_at FROM messages
+            SELECT direction, subject, created_at, encrypted FROM messages
             WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 10
             """,
             agent["id"],
@@ -54,7 +56,8 @@ async def account_page(request: Request):
             arrow = "→" if msg["direction"] == "outbound" else "←"
             time_str = msg["created_at"].strftime("%I:%M%p")
             subj = esc(msg["subject"] or "(no subject)")
-            msg_lines += f'    {arrow} "{subj}" ({time_str})<br>\n'
+            lock = " 🔒" if msg.get("encrypted") else ""
+            msg_lines += f'    {arrow} "{subj}" ({time_str}){lock}<br>\n'
 
         # Credit transactions
         txns = await pool.fetch(
@@ -72,7 +75,7 @@ async def account_page(request: Request):
 
         agent_sections += f"""
 <div style="border: 1px solid #ccc; padding: 16px; margin: 16px 0;">
-    <h3>{address}@sixel.email</h3>
+    <h3>{address}@sixel.email{totp_badge}</h3>
     <p>Status: {status} (last seen: {last_seen_str})</p>
     <p>Allowed contact: {esc(agent['allowed_contact'])}</p>
     <p>Credits: {agent['credit_balance']} messages</p>

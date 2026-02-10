@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     signing_secret: str = "dev-signing-secret-change-in-prod"
     api_base_url: str = "http://localhost:8000"
     mail_domain: str = "sixel.email"
+    cf_worker_secret: str = ""  # Shared secret for authenticating Cloudflare Email Worker
+    cf_account_id: str = ""  # Cloudflare account ID (for KV API)
+    cf_kv_namespace_id: str = ""  # Cloudflare KV namespace ID (agent→contact mappings)
+    cf_api_token: str = ""  # Cloudflare API token (for KV writes)
 
     model_config = {"env_file": ".env"}
 

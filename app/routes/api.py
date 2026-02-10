@@ -40,6 +40,7 @@ class MessageResponse(BaseModel):
     subject: str | None
     body: str
     received_at: str
+    encrypted: bool = False
 
 
 class InboxResponse(BaseModel):
@@ -148,7 +149,7 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
     # Fetch unread inbound messages
     rows = await pool.fetch(
         """
-        SELECT id, subject, body, created_at FROM messages
+        SELECT id, subject, body, created_at, encrypted FROM messages
         WHERE agent_id = $1 AND direction = 'inbound' AND is_read = FALSE
         ORDER BY created_at
         """,
@@ -169,6 +170,7 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
             subject=row["subject"],
             body=row["body"],
             received_at=row["created_at"].isoformat(),
+            encrypted=row.get("encrypted", False),
         )
         for row in rows
     ]
@@ -187,7 +189,7 @@ async def get_message(message_id: str, agent_id: str = Depends(get_agent_id)):
 
     row = await pool.fetchrow(
         """
-        SELECT id, subject, body, created_at FROM messages
+        SELECT id, subject, body, created_at, encrypted FROM messages
         WHERE id = $1 AND agent_id = $2
         """,
         message_id,
@@ -201,6 +203,7 @@ async def get_message(message_id: str, agent_id: str = Depends(get_agent_id)):
         subject=row["subject"],
         body=row["body"],
         received_at=row["created_at"].isoformat(),
+        encrypted=row.get("encrypted", False),
     )
 
 

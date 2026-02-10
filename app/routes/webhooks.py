@@ -1,6 +1,7 @@
 import base64
 import email
 import email.policy
+import hmac
 import json
 import logging
 import re
@@ -169,7 +170,73 @@ async def _store_inbound(pool, agent_address: str, from_addr: str, subject: str,
     return {"status": "received"}
 
 
-# POST /webhooks/ses — receive inbound email via SNS
+# POST /webhooks/inbound — receive inbound email from Cloudflare Email Worker
+@router.post("/inbound")
+async def cf_inbound(request: Request):
+    """Handle inbound email forwarded from Cloudflare Email Worker.
+
+    The Worker has already:
+    - Verified DMARC (Cloudflare Email Routing enforces at SMTP)
+    - Checked allowed contact (Worker rejects non-allowed senders)
+    - Optionally encrypted the body with TOTP (if agent has TOTP enabled)
+    """
+    # Verify the request is from our Worker
+    auth_header = request.headers.get("X-Worker-Auth", "")
+    if not settings.cf_worker_secret or not auth_header:
+        raise HTTPException(status_code=403, detail="Missing authentication")
+    if not hmac.compare_digest(auth_header, settings.cf_worker_secret):
+        raise HTTPException(status_code=403, detail="Invalid authentication")
+
+    body = await request.json()
+    agent_address = body.get("agent_address", "").lower().strip()
+    from_addr = body.get("from", "").strip()
+    subject = body.get("subject", "")
+    message_body = body.get("body", "")
+    encrypted = body.get("encrypted", False)
+
+    if not agent_address or not from_addr:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    pool = await get_pool()
+
+    agent = await pool.fetchrow(
+        "SELECT id, allowed_contact, credit_balance FROM agents WHERE address = $1",
+        agent_address,
+    )
+    if not agent:
+        logger.info("Inbound for unknown agent: %s", agent_address)
+        return {"status": "dropped", "reason": "unknown_agent"}
+
+    # Double-check allowed contact (defense in depth — Worker already checked)
+    if from_addr.lower() != agent["allowed_contact"].lower():
+        logger.warning(
+            "CF Worker forwarded email from %s but allowed contact is %s for %s",
+            from_addr, agent["allowed_contact"], agent_address,
+        )
+        return {"status": "dropped", "reason": "sender_not_allowed"}
+
+    # Deduct credit
+    new_balance = await deduct_credit(pool, str(agent["id"]), "message_received")
+    if new_balance is None:
+        logger.info("Dropped inbound for %s (no credits)", agent_address)
+        return {"status": "dropped", "reason": "insufficient_credits"}
+
+    # Store message (body may be ciphertext or plaintext — we don't care)
+    await pool.execute(
+        """
+        INSERT INTO messages (agent_id, direction, subject, body, is_read, encrypted)
+        VALUES ($1, 'inbound', $2, $3, FALSE, $4)
+        """,
+        agent["id"],
+        subject,
+        message_body,
+        encrypted,
+    )
+
+    return {"status": "received"}
+
+
+# POST /webhooks/ses — receive inbound email via SNS (deprecated, retained for transition)
 @router.post("/ses")
 async def ses_inbound(request: Request):
     """Handle inbound email from SES via SNS with signature verification."""

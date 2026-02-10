@@ -14,6 +14,42 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _sync_agent_to_kv(address: str, allowed_contact: str, has_totp: bool):
+    """Push agent→contact mapping to Cloudflare KV for the Email Worker.
+
+    The Worker uses this to check allowed contacts at the edge.
+    If Cloudflare credentials aren't configured, log and skip (dev mode).
+    """
+    if not settings.cf_account_id or not settings.cf_kv_namespace_id or not settings.cf_api_token:
+        logger.info("Cloudflare KV not configured — skipping agent sync for %s", address)
+        return
+
+    import json
+
+    value = json.dumps({
+        "allowed_contact": allowed_contact.lower(),
+        "has_totp": has_totp,
+    })
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.put(
+                f"https://api.cloudflare.com/client/v4/accounts/{settings.cf_account_id}"
+                f"/storage/kv/namespaces/{settings.cf_kv_namespace_id}/values/{address}",
+                headers={
+                    "Authorization": f"Bearer {settings.cf_api_token}",
+                    "Content-Type": "text/plain",
+                },
+                content=value,
+            )
+            if resp.status_code == 200:
+                logger.info("Synced agent %s to Cloudflare KV", address)
+            else:
+                logger.warning("Failed to sync agent %s to KV: %s %s", address, resp.status_code, resp.text)
+    except Exception as e:
+        logger.warning("Error syncing agent %s to KV: %s", address, e)
+
+
 def make_session_token(user_id: str) -> str:
     sig = hmac.new(
         settings.signing_secret.encode(), user_id.encode(), hashlib.sha256
@@ -127,7 +163,7 @@ async def github_callback(code: str):
     return response
 
 
-# Step 3: Setup page — pick agent address, set allowed contact
+# Step 3: Setup page — pick agent address, set allowed contact, optional TOTP
 @router.get("/setup", response_class=HTMLResponse)
 async def setup_page(request: Request):
     user_id = get_user_id(request)
@@ -141,18 +177,115 @@ async def setup_page(request: Request):
     input {{ width: 100%; box-sizing: border-box; margin: 8px 0; }}
     button {{ cursor: pointer; background: #000; color: #fff; border: none; padding: 10px 20px; }}
     .suffix {{ color: #666; }}
-</style></head>
+    .totp-section {{ background: #f8f8f8; border: 1px solid #ddd; padding: 16px; margin: 16px 0; display: none; }}
+    .totp-section.active {{ display: block; }}
+    #qr-code {{ margin: 12px 0; }}
+    .secret-display {{ background: #fff; border: 1px solid #ccc; padding: 8px; font-size: 18px; letter-spacing: 2px; word-break: break-all; }}
+    .toggle-label {{ cursor: pointer; user-select: none; }}
+    .note {{ color: #666; font-size: 13px; margin: 4px 0; }}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+</head>
 <body>
 <h1>sixel.email</h1>
 <h2>Set up your agent</h2>
-<form method="POST" action="/setup">
+<form method="POST" action="/setup" id="setup-form">
     <label>Agent address:</label><br>
-    <input type="text" name="address" placeholder="my-agent" pattern="[a-z0-9\\-]{{3,30}}" required>
+    <input type="text" name="address" id="address" placeholder="my-agent" pattern="[a-z0-9\\-]{{3,30}}" required>
     <span class="suffix">@sixel.email</span><br><br>
     <label>Your email (the one allowed contact):</label><br>
     <input type="email" name="allowed_contact" required><br><br>
+
+    <label class="toggle-label">
+        <input type="checkbox" id="totp-toggle" name="enable_totp" value="1">
+        Enable TOTP encryption (recommended)
+    </label>
+    <p class="note">Encrypts your messages so even our server can't read them. Requires any authenticator app.</p>
+
+    <div class="totp-section" id="totp-section">
+        <h3>TOTP Setup</h3>
+        <p>Scan this QR code with your authenticator app (Google Authenticator, Authy, 1Password, etc.):</p>
+        <div id="qr-code"></div>
+        <p>Or copy this secret manually:</p>
+        <div class="secret-display" id="totp-secret-display"></div>
+        <button type="button" onclick="copySecret()" style="margin-top: 8px; font-size: 13px; padding: 6px 12px;">Copy secret</button>
+        <p class="note">This secret is generated in your browser. It never leaves this page. Save it — you'll need to give it to your agent.</p>
+        <input type="hidden" name="has_totp" id="has-totp" value="0">
+    </div>
+    <br>
     <button type="submit">Create agent</button>
 </form>
+
+<script>
+// Generate a random TOTP secret (base32, 20 bytes = 32 chars)
+function generateSecret() {{
+    const bytes = new Uint8Array(20);
+    crypto.getRandomValues(bytes);
+    const base32chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    let secret = '';
+    for (let i = 0; i < bytes.length; i++) {{
+        // Simple base32 encoding
+        secret += base32chars[bytes[i] % 32];
+    }}
+    // Pad to 32 chars
+    while (secret.length < 32) {{
+        const extra = new Uint8Array(1);
+        crypto.getRandomValues(extra);
+        secret += base32chars[extra[0] % 32];
+    }}
+    return secret;
+}}
+
+let totpSecret = null;
+
+document.getElementById('totp-toggle').addEventListener('change', function() {{
+    const section = document.getElementById('totp-section');
+    const hasTotp = document.getElementById('has-totp');
+    if (this.checked) {{
+        section.classList.add('active');
+        if (!totpSecret) {{
+            totpSecret = generateSecret();
+        }}
+        hasTotp.value = '1';
+        updateQR();
+    }} else {{
+        section.classList.remove('active');
+        hasTotp.value = '0';
+    }}
+}});
+
+document.getElementById('address').addEventListener('input', function() {{
+    if (totpSecret && document.getElementById('totp-toggle').checked) {{
+        updateQR();
+    }}
+}});
+
+function updateQR() {{
+    const address = document.getElementById('address').value || 'my-agent';
+    const otpUrl = 'otpauth://totp/sixel.email:' + encodeURIComponent(address) +
+                   '?secret=' + totpSecret + '&issuer=sixel.email';
+
+    document.getElementById('totp-secret-display').textContent = totpSecret;
+
+    // Generate QR code
+    const qrDiv = document.getElementById('qr-code');
+    qrDiv.innerHTML = '';
+    if (typeof qrcode !== 'undefined') {{
+        const qr = qrcode(0, 'M');
+        qr.addData(otpUrl);
+        qr.make();
+        qrDiv.innerHTML = qr.createSvgTag(4);
+    }}
+}}
+
+function copySecret() {{
+    if (totpSecret) {{
+        navigator.clipboard.writeText(totpSecret).then(function() {{
+            alert('Secret copied to clipboard');
+        }});
+    }}
+}}
+</script>
 </body></html>"""
 
 
@@ -165,6 +298,7 @@ async def create_agent(request: Request):
     form = await request.form()
     address = form["address"].lower().strip()
     allowed_contact = form["allowed_contact"].strip()
+    has_totp = form.get("has_totp", "0") == "1"
 
     # Validate address format
     import re
@@ -185,18 +319,22 @@ async def create_agent(request: Request):
     try:
         agent = await pool.fetchrow(
             """
-            INSERT INTO agents (user_id, address, allowed_contact, credit_balance)
-            VALUES ($1, $2, $3, 0)
+            INSERT INTO agents (user_id, address, allowed_contact, credit_balance, has_totp)
+            VALUES ($1, $2, $3, 0, $4)
             RETURNING id
             """,
             user_id,
             address,
             allowed_contact,
+            has_totp,
         )
     except Exception:
         raise HTTPException(status_code=400, detail="Address already taken")
 
     agent_id = agent["id"]
+
+    # Sync agent→contact mapping to Cloudflare KV (for Email Worker)
+    await _sync_agent_to_kv(address, allowed_contact, has_totp)
 
     # Generate API key
     key, key_hash, key_prefix = generate_api_key()
@@ -207,14 +345,36 @@ async def create_agent(request: Request):
         key_prefix,
     )
 
-    # Render key display page directly (never put API key in a URL)
+    # Build config snippet
+    totp_note = ""
+    if has_totp:
+        totp_note = (
+            "\\n\\nTOTP encryption is enabled for this agent.\\n"
+            "IMPORTANT: Use the reference client to read messages. Never call /v1/inbox directly.\\n"
+            "The reference client decrypts messages using your TOTP secret and only surfaces verified messages.\\n"
+            "Messages that fail decryption are discarded and an alert is sent to your contact."
+        )
+
     config_snippet = (
         f"You have an email address for contacting me when you're stuck.\\n"
         f"API: {settings.api_base_url}/v1\\n"
         f"Token: {key}\\n"
         f"Use POST /v1/send to email me. Use GET /v1/inbox to check for my reply.\\n"
         f"Poll /v1/inbox every 60 seconds while waiting."
+        f"{totp_note}"
     )
+
+    totp_html = ""
+    if has_totp:
+        totp_html = """
+<div style="background: #fff3cd; border: 1px solid #ffc107; padding: 16px; margin: 16px 0;">
+    <strong>TOTP Encryption Enabled</strong><br>
+    <p>Your agent's messages will be encrypted. To send an encrypted email to your agent,
+    paste the current 6-digit code from your authenticator app at the top or bottom of your message.</p>
+    <p>Give the TOTP secret from the setup page to your agent (in its config file).
+    The agent's reference client will use it to decrypt messages.</p>
+</div>"""
+
     return HTMLResponse(f"""<!DOCTYPE html>
 <html><head><title>Sixel-Mail - Agent Created</title>
 <style>
@@ -226,6 +386,7 @@ async def create_agent(request: Request):
 <body>
 <h1>sixel.email</h1>
 <h2>{address}@sixel.email</h2>
+{totp_html}
 <div style="background: #f0f0f0; padding: 16px; margin: 16px 0;">
     <strong>Your API key (shown once, save it now):</strong><br>
     <code>{key}</code><br><br>

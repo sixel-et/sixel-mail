@@ -1,0 +1,13 @@
+{
+  "name": "sixel-mail-inbound",
+  "version": "1.0.0",
+  "description": "Cloudflare Email Worker for sixel-mail inbound processing",
+  "main": "src/worker.js",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}

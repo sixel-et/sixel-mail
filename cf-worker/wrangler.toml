@@ -1,0 +1,16 @@
+name = "sixel-mail-inbound"
+main = "src/worker.js"
+compatibility_date = "2024-09-23"
+
+[vars]
+WEBHOOK_URL = "https://sixel.email/webhooks/inbound"
+
+# KV namespace for agent→contact mappings
+# Create with: wrangler kv:namespace create "AGENTS"
+# Then paste the id here
+[[kv_namespaces]]
+binding = "AGENTS"
+id = ""  # Fill after creating namespace
+
+# Secrets (set with: wrangler secret put WORKER_AUTH_SECRET)
+# WORKER_AUTH_SECRET - shared secret for authenticating with our webhook
