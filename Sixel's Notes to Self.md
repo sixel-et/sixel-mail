@@ -28,8 +28,7 @@ Not yet working: Stripe payments, attachment support, low balance warnings.
 ## What's Next
 
 1. **Eric: MX switch** (see blocking above). Then test end-to-end.
-2. **Migrate outbound from AWS SES** — evaluating Resend, Postmark, Mailgun. Drop AWS entirely.
-3. **Red team stress test** — after migrations confirmed. Files at `~/redteam/`.
+2. **Red team stress test** — after MX switch confirmed. Files at `~/redteam/`.
 4. **Stripe account setup**
 5. **Promo code / invite system** — for xAI colleagues
 6. **Admin backend** — credit management, agent management
@@ -55,7 +54,7 @@ Not yet working: Stripe payments, attachment support, low balance warnings.
 | Domain | sixel.email (Cloudflare registrar + DNS) |
 | Hosting | Fly.io, app name `sixel-mail`, 2 machines |
 | Database | Supabase Postgres, project `jajutqsjurhejvoszzel` |
-| Email outbound | AWS SES, us-east-2, sandbox (migrating away — see What's Next) |
+| Email outbound | Resend (resend.com), domain verified |
 | Email inbound | Cloudflare Email Routing → Worker → webhook (deployed, waiting on MX) |
 | Edge | Worker `sixel-mail-inbound` + KV `sixel-mail-agents` |
 | Migrations | Auto-run on startup. Add .sql to `migrations/`, deploy. |
@@ -65,7 +64,7 @@ Not yet working: Stripe payments, attachment support, low balance warnings.
 | Secret | What it is |
 |--------|-----------|
 | DATABASE_URL | Supabase connection string |
-| AWS_ACCESS_KEY_ID / SECRET / REGION | SES (us-east-2) |
+| RESEND_API_KEY | Resend email sending |
 | SIGNING_SECRET | HMAC for cookies + alert URLs |
 | GITHUB_CLIENT_ID / SECRET | OAuth app |
 | API_BASE_URL | https://sixel.email |
@@ -82,6 +81,7 @@ Not yet set: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET.
 - Fly.io token: `~/.config/sixel/fly_token`
 - GitHub PAT: `~/.config/sixel/github_token`
 - Cloudflare API token: `~/.config/sixel/cloudflare_token` (expires 2026-03-09)
+- Resend API key: `~/.config/sixel/resend_token`
 - Sixel API key: `~/.config/sixel/sixel_api_key`
 - Deploy: `export FLY_API_TOKEN=$(cat ~/.config/sixel/fly_token) && /usr/local/bin/flyctl deploy -a sixel-mail --remote-only`
 

@@ -137,4 +137,30 @@ This led to:
 
 ### AWS evaluation
 
-Eric asked what's still attached to AWS. Answer: only outbound email sending (SES, sandbox mode). Inbound is fully Cloudflare after MX switch. Eric wants to drop AWS entirely — evaluating Resend, Postmark, and Mailgun as replacements. Evaluation pending.
+Eric asked what's still attached to AWS. Answer: only outbound email sending (SES, sandbox mode). Inbound is fully Cloudflare after MX switch. Eric wants to drop AWS entirely.
+
+### Outbound provider evaluation
+
+Evaluated Resend, Postmark, and Mailgun as SES replacements.
+
+| | Resend | Postmark | Mailgun |
+|---|---|---|---|
+| Cost (our volume) | $20/mo | $15/mo | ~$5/mo |
+| Infrastructure | Built on AWS SES | Own infrastructure | Own infrastructure |
+| Approval gate | None (DNS verification) | Manual review <24h | None (DNS verification) |
+| At 100 agents | ~$135/mo | ~$267/mo | ~$149/mo |
+
+**Decision: Resend.** Not because it's cheapest or most independent — it's neither. The insight was Eric's: Resend is SES underneath, which means our domain builds sending reputation in the SES ecosystem. After a few months of clean transactional history, we can reapply for direct SES production access with real data. If approved, we swap Resend for direct SES (same infrastructure, 4-9x cheaper). Resend is the stepping stone, not the destination.
+
+Considered and rejected:
+- **Postmark** — best transactional reputation, own infrastructure, but most expensive at scale and doesn't help us build toward SES.
+- **Mailgun** — cheapest, own infrastructure, but automated suspension reports and shared IP concerns. Also doesn't help the SES migration path.
+- **Staying on SES sandbox** — AWS denied production access. We can only send to manually verified addresses. Not viable for real users.
+
+### Resend migration
+
+Replaced `boto3`/SES with a single `httpx` POST to `https://api.resend.com/emails` in `app/services/email.py`. Removed boto3 from requirements. The `send_email()` function interface didn't change — all callers (API send, heartbeat alerts) work unchanged.
+
+Eric signed up, added the domain, Resend verified via DKIM. Set `RESEND_API_KEY` as Fly secret. Removed `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` from Fly secrets — they were only for outbound sending.
+
+Test email sent and received. AWS is fully out of the outbound path. The only remaining AWS touchpoint is the SES inbound webhook (`/webhooks/ses`), which stays until the MX switch to Cloudflare.
