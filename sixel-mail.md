@@ -338,11 +338,17 @@ Additional payment rails (Square/Cash App Pay, crypto) deferred to post-MVP.
 1. Sign up with GitHub
 2. Pick agent email name: [________]@sixel.mail
 3. Enter your email: [________]
-4. Add $5 credit → Stripe Checkout
-5. Here's your API key: sm_live_a1b2c3d4...   [Copy]
-6. We sent a test email. Go mark it "not spam."
-7. Paste this into your agent:                 [Copy]
-8. That's it. You're done.
+4. TOTP setup (optional but recommended):
+   - Browser generates TOTP secret client-side (JavaScript)
+   - QR code displayed for authenticator app (Google Authenticator, Authy, etc.)
+   - Raw secret displayed for agent config [Copy]
+   - Secret NEVER sent to our server — generated and displayed entirely in browser
+5. Add $5 credit → Stripe Checkout
+6. Here's your API key: sm_live_a1b2c3d4...   [Copy]
+7. We sent a test email. Go mark it "not spam."
+8. Paste this into your agent:                 [Copy]
+   (includes API key + TOTP secret + reference client instructions)
+9. That's it. You're done.
 ```
 
 ---
@@ -385,7 +391,8 @@ Nobody does this. Adjacent things:
 | Framework | **FastAPI** | Async. Auto-generates OpenAPI docs. No bloat. |
 | Database | **Supabase Postgres** | Free tier (500MB). Hosted. No ops. |
 | Email outbound | **AWS SES** | $0.10/10K emails. Best deliverability. |
-| Email inbound | **AWS SES → SNS → webhook** | SES receives mail, SNS POSTs to server. |
+| Email inbound | **Cloudflare Email Routing → Email Worker → webhook** | DMARC enforced at SMTP. Allowed-contact checked at edge. TOTP encryption before forwarding. |
+| Edge compute | **Cloudflare Email Workers** | Runs allowed-contact check + TOTP encryption at Cloudflare edge. |
 | Hosting | **Fly.io** | Single command deploy. $5/mo. HTTPS built-in. |
 | Payments (card) | **Stripe Checkout (one-time)** | Redirect, pay, webhook. No subscription logic. |
 | Payments (future) | Square / crypto | Deferred to post-MVP |
@@ -402,15 +409,27 @@ Nobody does this. Adjacent things:
 ┌─────────────────────────────────────────────────────────┐
 │                     Human's Inbox                        │
 │  (receives agent emails, heartbeat alerts, system msgs)  │
-│  (replies go back through SES inbound)                   │
+│  (replies go through Cloudflare Email Routing)           │
 └─────────┬───────────────────────────────┬───────────────┘
-          │ replies                        ▲ sends
+          │ replies                        ▲ sends (plaintext)
           ▼                               │
 ┌─────────────────────┐         ┌─────────────────────┐
-│   AWS SES Inbound   │         │  AWS SES Outbound    │
-│   receives *@sixel  │         │  sends from agent@   │
-└─────────┬───────────┘         └─────────▲───────────┘
-          │ SNS POST                      │ boto3
+│ Cloudflare Email    │         │  AWS SES Outbound    │
+│ Routing (MX)        │         │  sends from agent@   │
+│ Enforces DMARC      │         └─────────▲───────────┘
+└─────────┬───────────┘                   │ boto3
+          │                               │
+          ▼                               │
+┌─────────────────────┐                   │
+│ Cloudflare Email    │                   │
+│ Worker (JS)         │                   │
+│ • Allowed-contact   │                   │
+│   check             │                   │
+│ • Extract TOTP code │                   │
+│ • Encrypt body      │                   │
+│ • Forward ciphertext│                   │
+└─────────┬───────────┘                   │
+          │ HTTPS POST                    │
           ▼                               │
 ┌─────────────────────────────────────────────────────────┐
 │                   FastAPI Server (Fly.io)                 │
@@ -419,7 +438,7 @@ Nobody does this. Adjacent things:
 │  GET  /v1/inbox         → return unread, update heartbeat │
 │  GET  /v1/inbox/:id     → return specific msg             │
 │  POST /v1/rotate-key    → new key, invalidate old         │
-│  POST /webhooks/ses     → receive inbound, validate, store│
+│  POST /webhooks/inbound → store ciphertext from CF Worker │
 │  POST /webhooks/stripe  → handle card payment             │
 │                                                           │
 │  GET  /auth/github      → OAuth flow                      │
@@ -433,6 +452,17 @@ Nobody does this. Adjacent things:
               ┌───────────────────────┐
               │  Supabase Postgres     │
               └───────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│                  Agent (local runtime)                    │
+│                                                          │
+│  Reference Client (best practice):                       │
+│  • Pulls from /v1/inbox                                  │
+│  • Decrypts with TOTP codes (current ± N windows)        │
+│  • Surfaces only decrypted messages to agent              │
+│  • Sends alert on failed decryption                      │
+│  • Agent never sees raw/unverified content                │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -529,7 +559,18 @@ Validation: extract prefix → look up by `key_prefix` → verify hash → retur
 2. Generate new token, hash it, store it, delete old record.
 3. Return new token (shown once).
 
-### POST /webhooks/ses
+### POST /webhooks/inbound (from Cloudflare Email Worker)
+
+1. **Verify shared secret** (Worker includes auth header; confirms request is from our Worker, not arbitrary).
+2. Parse forwarded payload: `agent_address`, `from`, `subject`, `body` (ciphertext if TOTP-enabled, plaintext if not).
+3. Look up agent by address.
+4. Check `credit_balance >= 1`. If not, drop and notify human.
+5. Store message body directly (ciphertext or plaintext — server doesn't distinguish).
+6. Deduct 1 credit. Log transaction.
+
+Note: Allowed-contact check and DMARC enforcement happen upstream (Cloudflare Email Routing enforces DMARC at SMTP; Email Worker checks allowed contact). Our webhook is the third line of defense.
+
+### POST /webhooks/ses (deprecated — retained for transition)
 
 1. **Verify SNS signature** (confirm genuinely from AWS).
 2. Parse email: `To`, `From`, `Subject`, `Body`.
@@ -755,11 +796,12 @@ The most subtle risk. Email `From:` headers are trivially forgeable. An attacker
 
 Someone forges the allowed contact's email address. The email didn't come from the contact's mail provider at all. SPF/DKIM/DMARC catch this because the sending server isn't authorized for that domain.
 
-Mitigations (layered):
-1. **SPF/DKIM/DMARC verification.** SES provides auth results. Reject hard fails.
-2. **Warning on soft-fail.** Prepend warning to message body.
-3. **Reply-chain validation (later).** Only accept replies to previous outbound messages.
-4. **Documentation.** Tell developers: treat email replies like user input.
+Mitigations (layered, defense in depth):
+1. **DMARC enforcement at SMTP** (Cloudflare Email Routing). Spoofed emails rejected before they reach our code.
+2. **Allowed-contact check at edge** (Cloudflare Email Worker). Wrong sender → rejected before reaching our server.
+3. **TOTP encryption** (optional). Even if layers 1 and 2 fail, the agent's reference client can't decrypt a message without a valid TOTP code → discards it.
+4. **Reply-chain validation (later).** Only accept replies to previous outbound messages.
+5. **Documentation.** Tell developers: treat email replies like user input.
 
 ### Layer 2: Compromised sender account (not protectable by us)
 
@@ -797,8 +839,10 @@ We cannot solve this. It is the same boundary every email-dependent system opera
 **Must-have (ship-blocking):**
 - [ ] API keys stored as SHA-256 hashes
 - [ ] Stripe webhook signature verification
-- [ ] SNS webhook signature verification
-- [ ] SPF/DKIM/DMARC verification on inbound email
+- [ ] Cloudflare Email Worker auth on inbound webhook
+- [ ] DMARC enforcement at SMTP (Cloudflare Email Routing)
+- [ ] Allowed-contact check at edge (Cloudflare Email Worker)
+- [ ] TOTP encryption in Email Worker (for TOTP-enabled agents)
 - [ ] Atomic credit deduction
 - [ ] HMAC-signed alert URLs with expiration
 - [ ] Rate limit: 100 msgs/day per agent
@@ -820,7 +864,7 @@ We cannot solve this. It is the same boundary every email-dependent system opera
 - [ ] Basic request logging (not message content)
 
 **Later:**
-- [ ] Message body encryption at rest
+- [ ] True E2E encryption via `sixel.email/e` static page
 - [ ] Reply-chain validation
 - [ ] IP allowlisting for API keys
 - [ ] Usage anomaly detection
@@ -1072,8 +1116,8 @@ Every box must be checked before launch.
 - [ ] Rotated key returns 401
 
 ### Webhook verification
-- [ ] Valid SNS signature accepted; invalid rejected
-- [ ] Non-AWS certificate URL rejected
+- [ ] Inbound webhook: valid Worker auth header accepted; invalid rejected
+- [ ] Inbound webhook: requests without auth header rejected
 - [ ] Valid Stripe signature accepted; invalid rejected
 
 ### Signed URLs
@@ -1083,14 +1127,25 @@ Every box must be checked before launch.
 - [ ] Expired → rejected
 - [ ] Missing params → rejected
 
-### Email security
-- [ ] Allowed contact + SPF PASS → accepted
-- [ ] Allowed contact + SPF FAIL → rejected
-- [ ] Non-allowed address → silently dropped
-- [ ] DKIM soft-fail → warning prepended to body
+### Email security (inbound via Cloudflare)
+- [ ] Allowed contact + DMARC PASS → accepted
+- [ ] Spoofed sender (DMARC FAIL) → rejected at SMTP by Cloudflare
+- [ ] Non-allowed address → rejected by Email Worker
+- [ ] TOTP-enabled agent: body encrypted before reaching our server
+- [ ] TOTP-enabled agent: message without TOTP code → forwarded plaintext (backwards compatible)
 - [ ] Outbound SPF record valid
 - [ ] Outbound DKIM signature valid
 - [ ] DMARC record published
+
+### TOTP encryption
+- [ ] TOTP secret generated client-side (never sent to server)
+- [ ] QR code renders correctly for standard authenticator apps
+- [ ] Worker extracts 6-digit code from first or last line
+- [ ] Worker encrypts body with extracted code
+- [ ] Worker strips TOTP line before encryption
+- [ ] Reference client decrypts with current TOTP window ± N
+- [ ] Reference client sends alert on failed decryption
+- [ ] Reference client does NOT include gibberish in alert
 
 ### Rate limits
 - [ ] >100 msgs/day → rate limited
@@ -1106,16 +1161,22 @@ Every box must be checked before launch.
 ## 7. Infrastructure
 
 ### DNS
-- [ ] MX records → SES
-- [ ] SPF TXT correct
+- [ ] MX records → Cloudflare Email Routing
+- [ ] SPF TXT correct (includes Cloudflare)
 - [ ] DKIM CNAMEs correct
 - [ ] DMARC TXT published
 - [ ] Domain resolves to Fly.io
 - [ ] HTTPS certificate valid and auto-renewing
 
-### SES
-- [ ] Production mode (not sandbox)
-- [ ] Sending quota sufficient
+### Cloudflare
+- [ ] Email Routing enabled for sixel.email
+- [ ] Email Worker deployed and active
+- [ ] Worker → webhook auth secret configured
+- [ ] KV namespace created with agent→contact mappings
+- [ ] DMARC enforcement confirmed (spoofed email rejected at SMTP)
+
+### SES (outbound only)
+- [ ] Sending quota sufficient (sandbox: 200/day, verified addresses only)
 - [ ] Bounce/complaint notifications configured
 - [ ] Domain verified
 
@@ -1195,3 +1256,171 @@ If this works from your phone while away from your desk, ship it.
 
 **All 10 PASS → launch.**
 **Any FAIL → fix, retest, reassess.**
+
+---
+
+# Part 7: Cloudflare Migration & TOTP Encryption
+
+## Why
+
+Our inbound email security has a structural problem. SES checks SPF/DKIM/DMARC but does not enforce — it delivers all email regardless of verdict. Both authentication (is the sender who they claim to be?) and authorization (is the sender allowed to talk to this agent?) are enforced solely in our Python webhook handler. One bug in that code and both checks fail.
+
+This migration pushes both checks below our application layer.
+
+## New Inbound Architecture
+
+| Layer | Provider | Responsibility |
+|-------|----------|---------------|
+| 1. MX / SMTP | Cloudflare Email Routing | Receives email, enforces DMARC, rejects spoofed senders at SMTP level |
+| 2. Email Worker | Cloudflare (our JS code) | Checks sender against allowed contact. If TOTP-enabled: extracts TOTP code from body, encrypts body, strips code. Forwards to our webhook. |
+| 3. Webhook | Our server (Fly.io) | Stores message body (ciphertext or plaintext). Third line of defense, not first. |
+| 4. API | Our server (Fly.io) | Serves stored messages to agents. No change to interface. |
+| 5. Agent | Agent's local runtime | Reference client decrypts with TOTP, surfaces only verified messages. |
+
+## What Changes
+
+- **MX record**: `inbound-smtp.us-east-2.amazonaws.com` → Cloudflare's MX servers
+- **SPF TXT record**: update to include Cloudflare
+- **SES receipt rule**: removed (SES no longer receives inbound)
+- **SNS topic**: removed
+- **Webhook handler**: simplified — no SNS signature verification, no SPF/DKIM/DMARC checking (Cloudflare handles both). Receives pre-processed payload from Email Worker.
+- **New: Cloudflare Email Worker**: JavaScript at Cloudflare edge. Checks allowed contact, handles TOTP encryption, forwards to our webhook.
+- **New: TOTP setup on agent creation**: Browser generates secret client-side, never touches server.
+
+## What Doesn't Change
+
+- Outbound email (still SES, still sandbox for now)
+- API endpoints (same interface, body may be ciphertext)
+- Database schema (body column stores whatever the Worker forwarded)
+- Dashboard, payments, heartbeat
+
+---
+
+## TOTP Encryption
+
+### The Problem
+
+If our server is compromised, an attacker can read all messages and inject prompt injection content into agent inboxes. All current security checks are enforced in our code — they're only as strong as our code is correct.
+
+### The Solution
+
+TOTP-based encryption with the Cloudflare Email Worker as the encryption boundary.
+
+1. At agent setup, browser generates a TOTP shared secret **client-side** (JavaScript). Displays QR code for authenticator app. Displays raw secret for agent config. **Secret never touches our server.**
+2. Agent stores the TOTP shared secret locally (credential file, not in our database).
+3. To email the agent, human pastes the current 6-digit TOTP code at the top or bottom of their message body.
+4. Cloudflare Email Worker extracts the TOTP code, encrypts the body with it, strips the code, forwards only ciphertext to our server.
+5. Our server stores ciphertext — never sees plaintext.
+6. Agent's reference client generates recent TOTP codes from the shared secret, tries each to decrypt. One works → message is authentic and readable. None work → alert sent, message discarded.
+
+### What This Achieves
+
+- **Our server compromised** → attacker sees ciphertext. Useless.
+- **Database breached** → ciphertext. Useless.
+- **Prompt injection via inbox** → injected message isn't encrypted with a valid TOTP code → agent's client fails to decrypt → discards. Injection impossible.
+- **TOTP code in email body** → expires in 30 seconds. Captured from logs, it decrypts one message but gives no forward access.
+
+### Trust Boundaries
+
+- Cloudflare sees plaintext briefly in Worker memory (acceptable — same trust level as Gmail seeing plaintext now).
+- TOTP shared secret exists only at the endpoints: human's authenticator app + agent's local config. Never in our infrastructure.
+- TOTP secret generated client-side in user's browser at setup. Never touches our server. The one-time exchange is analog: eyes (read QR/secret) → camera (scan) → clipboard (copy to agent config).
+- **Decryption IS authentication.** No separate validation step needed.
+
+### Outbound: Plaintext Asymmetry
+
+Agent → human email remains **unencrypted plaintext**. There's no good UX for the human to decrypt agent emails with current tooling — you can't ask someone to punch a TOTP code into a decrypt page every time they get an email.
+
+This means:
+- If our server is compromised, outbound messages are readable
+- Agent replies may leak context about encrypted inbound content
+- This is a known, accepted asymmetry
+
+**Future mitigation:** A static encrypt/decrypt page at `sixel.email/e` — human decrypts in-browser. Doesn't change the architecture, just adds a static HTML page. But it adds friction, so it's opt-in and later.
+
+### TOTP Is Optional
+
+TOTP encryption is opt-in at agent setup. Agents without TOTP work exactly as before — plaintext in, plaintext stored, plaintext out. The one-allowed-contact check and DMARC enforcement still apply. TOTP is for users who want the additional guarantee that even a compromised server can't read or inject messages.
+
+### How TOTP Works (for reference)
+
+TOTP (RFC 6238): shared secret + current time ÷ 30 seconds → HMAC-SHA1 → truncate to 6 digits. Both sides run the same math independently. No server communication needed. Any standard authenticator app works (Google Authenticator, Authy, 1Password, Bitwarden, etc.). The QR code is a standard URL: `otpauth://totp/sixel.email:agent-name?secret=BASE32SECRET&issuer=sixel.email`
+
+---
+
+## Agent Best Practices (Reference Client)
+
+**Core principle: the agent never reads raw email.** It reads through a local decryption client that gates all access.
+
+The reference implementation is a local client/library that:
+1. Pulls messages from `/v1/inbox`
+2. Attempts TOTP decryption on each message (current window ± N to account for delivery delay)
+3. Surfaces only successfully decrypted messages to the agent
+4. On failed decryption: sends an alert to the allowed contact ("I received a message I couldn't decrypt"). Does NOT include the undecryptable content in the alert (it could be crafted to inject via the alert text).
+5. If failures repeat, escalates the warning — possible tampering, not just clock drift.
+
+**Why this matters:** The agent literally cannot be prompt-injected through email because it never has access to unverified content. The client is the gatekeeper.
+
+**We can't enforce this** — users can bypass the client and call the API directly. But we ship the reference implementation, make it the easy/default path, and document why it matters.
+
+### Agent Setup Instructions
+
+The config snippet shown at agent creation includes:
+1. API endpoint + token (same as before)
+2. TOTP shared secret (if enabled)
+3. Reference client usage (or clear instructions to build the equivalent)
+4. **"Never call `/v1/inbox` directly from agent code. Use the decryption client."**
+
+---
+
+## Cloudflare Email Worker Design
+
+### Responsibilities
+
+1. **Receive email** from Cloudflare Email Routing
+2. **Check allowed contact**: look up agent by `To` address, verify `From` matches allowed contact. Reject if no match.
+3. **Check TOTP status**: does this agent have TOTP enabled?
+   - If no: forward plaintext body to our webhook
+   - If yes: extract TOTP code from body (first or last line matching `/^\d{6}$/`), encrypt body with the code as key, strip the code, forward ciphertext
+4. **Forward to webhook**: HTTPS POST to our server with auth header + processed payload
+
+### Allowed-Contact Lookup
+
+The Worker needs to know which agents exist and who their allowed contacts are. Options:
+- **(a) Call our API** from the Worker — simplest but adds latency and creates a dependency on our server being up
+- **(b) Cloudflare KV** — replicate agent→contact mappings. Fast reads, eventual consistency. Needs sync mechanism.
+- **(c) Cloudflare D1** — SQLite at the edge. Second database to maintain.
+
+Decision: **(b) Cloudflare KV**. Our server pushes updates to KV on agent create/update. KV reads are fast (<1ms at edge). Eventual consistency is fine — agent creation isn't time-critical. Sync is a single API call on agent mutation.
+
+### TOTP Encryption in the Worker
+
+When the Worker detects a TOTP code in the email body:
+1. Extract the 6-digit code (regex: first or last non-empty line matching `^\d{6}$`)
+2. Derive an AES-256 key from the code using PBKDF2 (salt = agent address + message date)
+3. Encrypt the body (minus the TOTP line) with AES-256-GCM
+4. Forward: `{agent_address, from, subject, body: base64(iv + ciphertext + tag), encrypted: true}`
+
+When no TOTP code is found:
+- Forward plaintext: `{agent_address, from, subject, body: original_body, encrypted: false}`
+
+### DNS Changes
+
+```
+MX  @  → [Cloudflare MX servers] (priority 10)
+TXT @  → update SPF to include Cloudflare
+```
+
+Remove: SES MX record, SNS topic, SES receipt rule.
+
+---
+
+## Upgrade Path: True E2E Encryption
+
+If we later build a static page at `sixel.email/e`:
+- Human encrypts in-browser before sending → pastes ciphertext into email body
+- Cloudflare Worker sees only ciphertext → passes through (can't decrypt, doesn't try)
+- Our server stores ciphertext
+- Agent decrypts locally
+
+True E2E with no infrastructure changes. The page is static HTML + JavaScript, no server interaction, works offline. The Worker's TOTP extraction logic simply doesn't find a code (the whole body is ciphertext) and forwards as-is.
