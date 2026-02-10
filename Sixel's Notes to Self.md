@@ -35,8 +35,10 @@ Not yet working:
 | Domain | sixel.email (Cloudflare registrar + DNS) |
 | Hosting | Fly.io, app name `sixel-mail`, 2 machines, region auto |
 | Database | Supabase Postgres, project `jajutqsjurhejvoszzel` |
-| Email | AWS SES, us-east-2, domain verified, DKIM records in Cloudflare |
+| Email outbound | AWS SES, us-east-2, domain verified, DKIM records in Cloudflare |
+| Email inbound | Transitioning: SES→SNS→webhook (current) → Cloudflare Email Routing→Worker→webhook (target) |
 | OAuth | GitHub OAuth app, callback URL: https://sixel.email/auth/github/callback |
+| Migrations | Auto-run on app startup via `_migrations` table. Add .sql files to `migrations/`, deploy, done. |
 
 ### Fly.io Secrets
 
@@ -54,7 +56,7 @@ All config is in Fly secrets (not in code, not in .env on prod):
 | API_BASE_URL | https://sixel.email |
 | MAIL_DOMAIN | sixel.email |
 
-Not yet set: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET.
+Not yet set: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, CF_WORKER_SECRET, CF_ACCOUNT_ID, CF_KV_NAMESPACE_ID, CF_API_TOKEN.
 
 ### AWS SES Inbound Pipeline
 
@@ -305,3 +307,4 @@ TOTP (RFC 6238): shared secret + current time ÷ 30 seconds → HMAC-SHA1 → tr
 - 2026-02-07: Fixed python-multipart dep, domain live at sixel.email, session auth for dashboard, security hardening (SNS verification, XSS escaping, Stripe lockdown, API key URL fix), AWS IAM credentials set, SES inbound pipeline fully connected (MX → SES → SNS → webhook), MIME email parsing with double-base64 decode, end-to-end email round-trip confirmed working
 - 2026-02-08: SPF/DKIM/DMARC enforcement on inbound (hard reject DKIM/DMARC FAIL, warn on soft-fail), Layer 2 trust documentation in spec, extended email conversation (sleep/wake over 15+ hours), discovered channel fixation failure mode, red team stress test planned and shelved, container built and migrated to new machine
 - 2026-02-09: API key rotated (old key was in repo history + baked into Docker image), credential references changed from hardcoded to file path. SES production access denied by AWS. Architecture review: discovered SES does not enforce DMARC (only reports verdicts), all security enforcement is in our application layer. Decided to migrate inbound to Cloudflare Email Routing + Email Workers — pushes DMARC enforcement and allowed-contact checks below our code. Red team test postponed until after migration so we test the hardened architecture.
+- 2026-02-10: Built Cloudflare migration + TOTP encryption. New: POST /webhooks/inbound endpoint, TOTP setup page (client-side secret generation, QR code), Cloudflare Email Worker (cf-worker/), reference client (client/sixel_client.py), auto-migration on app startup. Database migrated (has_totp, encrypted columns). All deployed to Fly.io. Container IPv6 issue: Supabase is IPv6-only, container is IPv4-only — solved permanently via auto-migration (Fly.io runs migrations on boot). Blocking: Cloudflare API token needed from Eric for KV namespace + Worker deployment + MX switch.
