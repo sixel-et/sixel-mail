@@ -16,11 +16,45 @@ from app.services.heartbeat import heartbeat_loop
 logging.basicConfig(level=logging.INFO)
 
 
+async def run_migrations():
+    """Run pending database migrations on startup.
+
+    Each migration is idempotent (uses IF NOT EXISTS / IF NOT EXISTS).
+    Tracks applied migrations in a migrations table.
+    """
+    pool = await get_pool()
+
+    # Create migrations tracking table if it doesn't exist
+    await pool.execute("""
+        CREATE TABLE IF NOT EXISTS _migrations (
+            filename TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ DEFAULT now()
+        )
+    """)
+
+    import pathlib
+    migrations_dir = pathlib.Path(__file__).parent.parent / "migrations"
+    if not migrations_dir.exists():
+        return
+
+    applied = {row["filename"] for row in await pool.fetch("SELECT filename FROM _migrations")}
+
+    for sql_file in sorted(migrations_dir.glob("*.sql")):
+        if sql_file.name in applied:
+            continue
+        logging.info("Running migration: %s", sql_file.name)
+        sql = sql_file.read_text()
+        await pool.execute(sql)
+        await pool.execute("INSERT INTO _migrations (filename) VALUES ($1)", sql_file.name)
+        logging.info("Migration applied: %s", sql_file.name)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     await get_pool()
     logging.info("Database pool created")
+    await run_migrations()
     task = asyncio.create_task(heartbeat_loop())
     yield
     # Shutdown
