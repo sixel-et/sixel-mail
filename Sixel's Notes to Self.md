@@ -160,17 +160,72 @@ Between sessions I don't exist, so the heartbeat will flag me as down — that's
 
 ## What's Next (in order of priority)
 
-1. **Red team stress test** -- infrastructure pentest. Files at `~/redteam/`. Attacker in its own isolated container.
-2. **Wait for SES production access** -- requested, pending AWS approval
+~~1. **Red team stress test** -- infrastructure pentest. Files at `~/redteam/`. Attacker in its own isolated container.~~
+~~2. **SES production access denied** -- AWS rejected the request. Stuck in sandbox (verified addresses only). Need to reapply with more detail or switch to a different sending provider (Postmark, Mailgun, etc.)~~
 3. **Stripe account setup** -- secret key, webhook secret, test a payment
 4. **Promo code / invite system** -- for xAI colleagues
 5. **Admin backend** -- credit management, agent management, promo codes
 6. **support@sixel.email** -- forwarding to Eric's Gmail (NOT through Sixel)
 7. **Attachment support** -- outbound PDF (send_raw_email), inbound (S3)
-8. **Scope down IAM policy** -- restrict to ses:SendEmail/SendRawEmail for sixel.email only
+~~8. **Scope down IAM policy** -- restrict to ses:SendEmail/SendRawEmail for sixel.email only~~
+
+### Revised priorities (2026-02-09)
+
+Items 1, 2, and 8 are superseded by the Cloudflare migration plan below.
+
+1. **Migrate inbound email from SES to Cloudflare Email Routing + Email Workers** -- Cloudflare enforces DMARC at SMTP level (SES does not). Email Worker can enforce allowed-contact check at Cloudflare's edge before messages reach our server. Pushes authentication (is the sender real?) and authorization (is the sender allowed?) below our application layer. See "Cloudflare Migration Plan" section.
+2. **Red team stress test** -- infrastructure pentest. Should run AFTER the Cloudflare migration, so we're testing the hardened architecture. Files at `~/redteam/`. Attacker in QEMU VM inside Sixel's container (recursive depth, no lateral spread).
+3. **SES sandbox: stay in it** -- AWS rejected production access. Sandbox is fine for now: manually verify early users' addresses. 50 address limit, 200 emails/day. Revisit outbound provider when user count demands it. Cloudflare Email Service (private beta) may replace SES outbound too.
+4. **Stripe account setup**
+5. **Promo code / invite system** -- for xAI colleagues
+6. **Admin backend**
+7. **support@sixel.email** -- forwarding to Eric's Gmail
+8. **Attachment support**
+
+## Cloudflare Migration Plan (2026-02-09)
+
+### Why
+
+Our inbound email security has a structural problem. SES checks SPF/DKIM/DMARC but does not enforce — it delivers all email regardless of verdict. Both authentication (is the sender who they claim to be?) and authorization (is the sender allowed to talk to this agent?) are enforced solely in our Python webhook handler. One bug in that code and both checks fail.
+
+Cloudflare Email Routing enforces DMARC at the SMTP level — spoofed emails are rejected before they reach us. Cloudflare Email Workers let us run custom logic (the allowed-contact check) at Cloudflare's edge. This pushes both security checks below our application layer.
+
+### Target Architecture
+
+| Layer | Provider | Responsibility |
+|-------|----------|---------------|
+| 1. MX / SMTP | Cloudflare Email Routing | Receives email, enforces DMARC, rejects spoofed senders |
+| 2. Email Worker | Cloudflare (our JS code) | Checks sender against allowed contact for the target agent. Rejects unauthorized senders. Forwards authorized email to our webhook. |
+| 3. Webhook | Our server (Fly.io) | Parses message, stores in database. Third line of defense, not first. |
+| 4. API | Our server (Fly.io) | Serves messages to agents. No change. |
+
+### What Changes
+
+- **MX record**: `inbound-smtp.us-east-2.amazonaws.com` → Cloudflare's MX servers
+- **SPF TXT record**: update to include Cloudflare
+- **SES receipt rule**: can be removed (SES no longer receives inbound)
+- **SNS topic**: can be removed
+- **Webhook handler**: simplified — no longer needs SNS signature verification, no longer needs SPF/DKIM/DMARC checking (Cloudflare handles both). Still needs to parse the email body and store it.
+- **New: Email Worker**: JavaScript running on Cloudflare. Needs to query our API or database to check if the sender is the allowed contact for the target agent. Could call a new internal endpoint on our server, or use Cloudflare KV/D1 for a cached copy of the allowed-contact mappings.
+
+### What Doesn't Change
+
+- Outbound email (still SES, still sandbox for now)
+- API endpoints
+- Database schema
+- Agent creation flow
+- Dashboard
+
+### Open Questions
+
+- **How does the Email Worker check allowed contacts?** Options: (a) call our API from the Worker, (b) replicate the agent→contact mappings into Cloudflare KV, (c) use Cloudflare D1 (SQLite at the edge). Option (a) is simplest but adds latency. Option (b) needs a sync mechanism. Option (c) is a second database to maintain.
+- **What format does Cloudflare forward to our webhook?** Need to check if it's raw MIME, parsed JSON, or something else. Our current parsing assumes SES→SNS format (double base64). This will change.
+- **Can we keep SES as a fallback?** MX records support priority. We could set Cloudflare as primary (priority 10) and SES as secondary (priority 20). But this means some emails could bypass Cloudflare's checks by going to SES directly if Cloudflare is down. Probably not worth it — defeats the purpose.
+- **Cloudflare Email Service (private beta)** — if we can get into the beta, this could replace SES for outbound too. One provider for everything. Worth checking.
 
 ## Build Timeline
 
 - 2026-02-06: Spec review, environment setup, phases 1-7 built, first deploy to Fly.io
 - 2026-02-07: Fixed python-multipart dep, domain live at sixel.email, session auth for dashboard, security hardening (SNS verification, XSS escaping, Stripe lockdown, API key URL fix), AWS IAM credentials set, SES inbound pipeline fully connected (MX → SES → SNS → webhook), MIME email parsing with double-base64 decode, end-to-end email round-trip confirmed working
 - 2026-02-08: SPF/DKIM/DMARC enforcement on inbound (hard reject DKIM/DMARC FAIL, warn on soft-fail), Layer 2 trust documentation in spec, extended email conversation (sleep/wake over 15+ hours), discovered channel fixation failure mode, red team stress test planned and shelved, container built and migrated to new machine
+- 2026-02-09: API key rotated (old key was in repo history + baked into Docker image), credential references changed from hardcoded to file path. SES production access denied by AWS. Architecture review: discovered SES does not enforce DMARC (only reports verdicts), all security enforcement is in our application layer. Decided to migrate inbound to Cloudflare Email Routing + Email Workers — pushes DMARC enforcement and allowed-contact checks below our code. Red team test postponed until after migration so we test the hardened architecture.
