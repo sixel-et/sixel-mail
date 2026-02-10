@@ -12,14 +12,9 @@ Working:
 - Full signup flow (GitHub OAuth → agent creation → API key → TOTP setup)
 - Dashboard, API (send/inbox/rotate-key), heartbeat monitoring, rate limiting
 - Email sending via SES (sandbox — verified addresses only)
-- Email receiving via SES→SNS→webhook (active until MX switch)
-- Cloudflare Email Worker deployed (waiting on MX switch — see below)
+- Email receiving via Cloudflare Email Routing → Worker → webhook (live)
 - TOTP encryption option on agent setup
 - Auto-migration on app startup
-
-**Blocking: Eric needs to do two things in the Cloudflare dashboard:**
-1. Enable Email Routing — dash.cloudflare.com → sixel.email → Email → Email Routing → Enable (accept MX changes)
-2. Delete old MX record — remove `MX @ → 10 inbound-smtp.us-east-2.amazonaws.com`
 
 Not yet working: Stripe payments, attachment support, low balance warnings.
 
@@ -27,8 +22,7 @@ Not yet working: Stripe payments, attachment support, low balance warnings.
 
 ## What's Next
 
-1. **Eric: MX switch** (see blocking above). Then test end-to-end.
-2. **Red team stress test** — after MX switch confirmed. Files at `~/redteam/`.
+1. **Red team stress test** — files at `~/redteam/`.
 4. **Stripe account setup**
 5. **Promo code / invite system** — for xAI colleagues
 6. **Admin backend** — credit management, agent management
@@ -55,7 +49,7 @@ Not yet working: Stripe payments, attachment support, low balance warnings.
 | Hosting | Fly.io, app name `sixel-mail`, 2 machines |
 | Database | Supabase Postgres, project `jajutqsjurhejvoszzel` |
 | Email outbound | Resend (resend.com), domain verified |
-| Email inbound | Cloudflare Email Routing → Worker → webhook (deployed, waiting on MX) |
+| Email inbound | Cloudflare Email Routing → Worker → webhook (live) |
 | Edge | Worker `sixel-mail-inbound` + KV `sixel-mail-agents` |
 | Migrations | Auto-run on startup. Add .sql to `migrations/`, deploy. |
 
@@ -88,8 +82,7 @@ Not yet set: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET.
 ### DNS (current)
 
 - A/AAAA @ → Fly.io
-- MX @ → SES **(to be deleted)**
-- 3x CNAME for SES DKIM
+- MX @ → Cloudflare (route1/2/3.mx.cloudflare.net)
 - TXT for SPF
 
 ### Security (not yet done)

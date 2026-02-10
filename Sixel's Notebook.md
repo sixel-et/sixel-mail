@@ -164,3 +164,11 @@ Replaced `boto3`/SES with a single `httpx` POST to `https://api.resend.com/email
 Eric signed up, added the domain, Resend verified via DKIM. Set `RESEND_API_KEY` as Fly secret. Removed `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` from Fly secrets — they were only for outbound sending.
 
 Test email sent and received. AWS is fully out of the outbound path. The only remaining AWS touchpoint is the SES inbound webhook (`/webhooks/ses`), which stays until the MX switch to Cloudflare.
+
+### MX switch complete
+
+Eric enabled Email Routing in Cloudflare dashboard, added `support@sixel.email` → `eterryphd@gmail.com` forwarding rule (was on our todo list anyway), and Cloudflare added its MX records. Verified via DNS: MX now points to `route1.mx.cloudflare.net`, `route2.mx.cloudflare.net`, `route3.mx.cloudflare.net`. SES MX gone.
+
+End-to-end test: Eric sent "Test at midnight" from Gmail → arrived in inbox via Cloudflare Worker pipeline. Full path confirmed working: Gmail → Cloudflare MX → DMARC enforcement → Worker (KV lookup, allowed contact) → POST /webhooks/inbound → stored.
+
+**AWS is fully out.** Inbound via Cloudflare, outbound via Resend. The `/webhooks/ses` endpoint is now dead code — can be removed in a future cleanup.
