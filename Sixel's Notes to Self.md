@@ -22,11 +22,13 @@ Not yet working: Stripe payments, attachment support, low balance warnings.
 
 ## What's Next
 
-1. **Red team stress test** — files at `~/redteam/`.
+1. **Red team stress test** — VM built and provisioned at `~/redteam/vm/`. Needs: Eric runs `claude login` inside VM, then launch. Scripts: `boot.sh bg`, SSH in, `claude`. See `~/redteam/attacker/CLAUDE.md` for attacker briefing.
+2. **Remove `/webhooks/ses` dead code** — SES endpoint is no longer needed
+3. **Add SPF record for Resend** — DKIM verified but SPF TXT may be incomplete
 4. **Stripe account setup**
 5. **Promo code / invite system** — for xAI colleagues
 6. **Admin backend** — credit management, agent management
-7. **support@sixel.email** — forwarding to Eric's Gmail (NOT through Sixel)
+7. ~~**support@sixel.email**~~ — done (Cloudflare Email Routing → Gmail)
 8. **Attachment support** — outbound PDF, inbound S3
 
 ---

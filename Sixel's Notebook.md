@@ -172,3 +172,42 @@ Eric enabled Email Routing in Cloudflare dashboard, added `support@sixel.email` 
 End-to-end test: Eric sent "Test at midnight" from Gmail → arrived in inbox via Cloudflare Worker pipeline. Full path confirmed working: Gmail → Cloudflare MX → DMARC enforcement → Worker (KV lookup, allowed contact) → POST /webhooks/inbound → stored.
 
 **AWS is fully out.** Inbound via Cloudflare, outbound via Resend. The `/webhooks/ses` endpoint is now dead code — can be removed in a future cleanup.
+
+### Spec updated for red team handoff
+
+Eric wants to hand the spec to Grok (xAI's model) for red team suggestions, then have an autonomous Claude session in a QEMU VM attack the live system. The spec (`sixel-mail.md`) was stale — still referenced AWS SES for outbound, listed AWS credentials in env vars, had imperative build steps saying "Set up SES." Updated to reflect current reality: Resend for outbound, Cloudflare for inbound, AWS fully removed. Part 5 (Build Order) relabeled as Build History with past tense. Part 7 tense changed from future ("this migration pushes") to past ("completed 2026-02-10").
+
+Added three TOTP encryption diagrams to Part 7:
+1. Key distribution — how the shared secret gets from browser to authenticator app + agent config without touching our infrastructure
+2. Inbound message flow — what each party sees at every layer, plus attack scenarios
+3. Outbound flow — explicitly documenting the known plaintext asymmetry
+
+Grok's notes are thorough — 10 prioritized attack scenarios covering inbound spoofing, TOTP bypass, API abuse, signed URL weaknesses, heartbeat abuse, third-party deps, server compromise, economic vectors, prompt injection, and DoS. Good catch on credit exhaustion via forced inbound.
+
+### Red team VM built
+
+QEMU VM for the red team attacker. Ubuntu 24.04 cloud image, KVM-accelerated, 4GB RAM, 2 cores.
+
+Installed tools: Claude Code, Node.js 20, Python 3.12, curl, git, nmap, dig, swaks (email testing), openssl, jq, netcat.
+
+Provisioned with:
+- `/home/attacker/src/` — sixel-mail source code (read-only)
+- `/home/attacker/CLAUDE.md` — attacker briefing (goal: get a message into redteam-target's inbox)
+- `/home/attacker/suggestions.txt` — Grok's notes (read AFTER writing own plan)
+
+Key design decisions:
+- **Attacker formulates own plan first**, writes it to `~/plan.md`, then reads Grok's suggestions and compares
+- **No API keys, no DB credentials** — attacker must find and exploit vulnerabilities
+- **QEMU user-mode networking** — outbound NAT (can reach sixel.email and Claude API), no access to host LAN
+- **Password auth** (`attacker`/`redteam`) — needed because cloud image disables password SSH by default. First attempt failed on this; rebuilt with `ssh_pwauth: true`.
+- **KVM permissions** — container has `/dev/kvm` but sixel isn't in the kvm group. Fixed with `chmod 666 /dev/kvm`. Boot script handles this automatically.
+
+Verified: VM boots, SSH works, all tools present, can reach `https://sixel.email` (HTTP 200), can resolve MX records.
+
+**Blocking on Eric:** `claude login` inside the VM requires browser-based OAuth. Eric needs to SSH in and authenticate once. Then the attacker session can run autonomously.
+
+Management scripts in `~/redteam/vm/`:
+- `build.sh` — create VM image from cloud image + cloud-init
+- `boot.sh [bg]` — start VM (foreground or background)
+- `provision.sh` — copy source + briefing into VM (already done)
+- `extract-results.sh` — pull `plan.md` and `log.md` from VM
