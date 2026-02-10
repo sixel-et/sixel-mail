@@ -3,9 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     database_url: str
-    aws_access_key_id: str = ""
-    aws_secret_access_key: str = ""
-    aws_region: str = "us-east-2"
+    resend_api_key: str = ""
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     github_client_id: str = ""
