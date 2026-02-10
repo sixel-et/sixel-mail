@@ -390,7 +390,7 @@ Nobody does this. Adjacent things:
 | Language | **Python 3.12** | Claude Code is excellent with Python. FastAPI is minimal. |
 | Framework | **FastAPI** | Async. Auto-generates OpenAPI docs. No bloat. |
 | Database | **Supabase Postgres** | Free tier (500MB). Hosted. No ops. |
-| Email outbound | **AWS SES** | $0.10/10K emails. Best deliverability. |
+| Email outbound | **Resend** | Built on SES infrastructure. Domain verified via DKIM. |
 | Email inbound | **Cloudflare Email Routing → Email Worker → webhook** | DMARC enforced at SMTP. Allowed-contact checked at edge. TOTP encryption before forwarding. |
 | Edge compute | **Cloudflare Email Workers** | Runs allowed-contact check + TOTP encryption at Cloudflare edge. |
 | Hosting | **Fly.io** | Single command deploy. $5/mo. HTTPS built-in. |
@@ -414,10 +414,10 @@ Nobody does this. Adjacent things:
           │ replies                        ▲ sends (plaintext)
           ▼                               │
 ┌─────────────────────┐         ┌─────────────────────┐
-│ Cloudflare Email    │         │  AWS SES Outbound    │
+│ Cloudflare Email    │         │  Resend API          │
 │ Routing (MX)        │         │  sends from agent@   │
 │ Enforces DMARC      │         └─────────▲───────────┘
-└─────────┬───────────┘                   │ boto3
+└─────────┬───────────┘                   │ httpx
           │                               │
           ▼                               │
 ┌─────────────────────┐                   │
@@ -434,7 +434,7 @@ Nobody does this. Adjacent things:
 ┌─────────────────────────────────────────────────────────┐
 │                   FastAPI Server (Fly.io)                 │
 │                                                          │
-│  POST /v1/send         → validate, deduct, send via SES  │
+│  POST /v1/send         → validate, deduct, send (Resend) │
 │  GET  /v1/inbox         → return unread, update heartbeat │
 │  GET  /v1/inbox/:id     → return specific msg             │
 │  POST /v1/rotate-key    → new key, invalidate old         │
@@ -539,7 +539,7 @@ Validation: extract prefix → look up by `key_prefix` → verify hash → retur
 
 1. Validate token → get agent.
 2. Check `credit_balance >= 1`. If not, return 402.
-3. Send via SES from `{agent.address}@sixel.mail` to `agent.allowed_contact`.
+3. Send via Resend from `{agent.address}@sixel.mail` to `agent.allowed_contact`.
 4. Server appends mandatory footer (agent cannot control or suppress).
 5. Store message (direction: 'outbound').
 6. Deduct 1 credit atomically: `UPDATE agents SET credit_balance = credit_balance - 1 WHERE id = :id AND credit_balance >= 1 RETURNING credit_balance`.
@@ -570,16 +570,9 @@ Validation: extract prefix → look up by `key_prefix` → verify hash → retur
 
 Note: Allowed-contact check and DMARC enforcement happen upstream (Cloudflare Email Routing enforces DMARC at SMTP; Email Worker checks allowed contact). Our webhook is the third line of defense.
 
-### POST /webhooks/ses (deprecated — retained for transition)
+### POST /webhooks/ses (removed)
 
-1. **Verify SNS signature** (confirm genuinely from AWS).
-2. Parse email: `To`, `From`, `Subject`, `Body`.
-3. Look up agent by address.
-4. **Validate `From` matches `agent.allowed_contact`.** If not, silently drop.
-5. **Check SPF/DKIM/DMARC.** Reject on hard fail. Prepend warning on soft-fail.
-6. Check `credit_balance >= 1`. If not, drop and notify human.
-7. Store message (direction: 'inbound', is_read: FALSE).
-8. Deduct 1 credit. Log transaction.
+Formerly handled SES→SNS→webhook inbound pipeline. Removed after Cloudflare migration (2026-02-10). All inbound now goes through `/webhooks/inbound` via Cloudflare Email Worker. Dead code — endpoint can be deleted.
 
 ### POST /webhooks/stripe
 
@@ -655,12 +648,14 @@ def sign_alert_url(agent_id: str, action: str) -> str:
 
 ---
 
-## AWS SES Setup
+## Resend Setup (outbound email)
 
-1. **Verify domain** in SES. Add DNS: DKIM (3 CNAMEs), SPF (TXT), DMARC (TXT).
-2. **Request production access** immediately (up to 24hrs to approve). SES starts in sandbox.
-3. **Inbound rule:** Receipt Rule Set for `*@sixel.mail` → SNS topic → webhook endpoint.
-4. **IAM:** Create user with **only** `ses:SendEmail` and `ses:SendRawEmail`. Nothing else.
+Resend (resend.com) handles all outbound email. Built on AWS SES infrastructure underneath, which means our domain builds SES sending reputation. If we later need direct SES access (4-9x cheaper at scale), we can reapply with real sending history.
+
+1. **Domain verified** via DKIM (DNS records managed by Resend).
+2. **API key** stored as Fly.io secret (`RESEND_API_KEY`).
+3. **Send via** single `httpx` POST to `https://api.resend.com/emails`.
+4. **No AWS credentials needed.** AWS is fully removed from the stack.
 
 ## Stripe Setup
 
@@ -689,7 +684,7 @@ def create_checkout_session(agent_id: str, amount_dollars: int):
 
 ## Deliverability
 
-**Infrastructure (handle once):** SPF/DKIM/DMARC from day one. Clean domain. Warm up before launch. Shared SES IPs are fine.
+**Infrastructure (handle once):** SPF/DKIM/DMARC from day one. Clean domain. Warm up before launch. Resend handles IP reputation.
 
 **Per-user (handle once):** First email might hit spam. Human marks "not spam." Done forever. Onboarding includes: "Check your inbox and spam folder. Mark it as safe."
 
@@ -708,12 +703,12 @@ sixel-mail/
 │   ├── auth.py               # GitHub OAuth + API key validation
 │   ├── routes/
 │   │   ├── api.py            # /v1/send, /v1/inbox, /v1/inbox/:id, /v1/rotate-key
-│   │   ├── webhooks.py       # /webhooks/ses, /webhooks/stripe
+│   │   ├── webhooks.py       # /webhooks/inbound (CF Worker), /webhooks/stripe
 │   │   ├── alerts.py         # /alert (signed URL handler + confirmation page)
 │   │   ├── account.py        # /account
 │   │   └── signup.py         # /auth/github, /setup, /topup
 │   ├── services/
-│   │   ├── email.py          # SES send + email templates + footer generation
+│   │   ├── email.py          # Resend send + email templates + footer generation
 │   │   ├── credits.py        # Credit balance management
 │   │   ├── heartbeat.py      # Heartbeat checker background task
 │   │   └── signing.py        # HMAC URL signing/verification
@@ -734,16 +729,18 @@ sixel-mail/
 
 ```bash
 DATABASE_URL=postgresql://...@db.supabase.co:5432/postgres
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
-AWS_REGION=us-east-1
-STRIPE_SECRET_KEY=sk_live_...
-STRIPE_WEBHOOK_SECRET=whsec_...
+RESEND_API_KEY=re_...
+STRIPE_SECRET_KEY=sk_live_...        # not yet configured
+STRIPE_WEBHOOK_SECRET=whsec_...      # not yet configured
 GITHUB_CLIENT_ID=...
 GITHUB_CLIENT_SECRET=...
 SIGNING_SECRET=...
-API_BASE_URL=https://api.sixel.mail
-MAIL_DOMAIN=sixel.mail
+API_BASE_URL=https://sixel.email
+MAIL_DOMAIN=sixel.email
+CF_WORKER_SECRET=...                 # shared secret: Worker ↔ webhook auth
+CF_ACCOUNT_ID=...                    # Cloudflare account ID (for KV API)
+CF_KV_NAMESPACE_ID=...               # KV namespace (agent→contact mappings)
+CF_API_TOKEN=...                     # Cloudflare API token (KV writes)
 ```
 
 ## Deployment
@@ -775,7 +772,7 @@ app = "sixel-mail"
 - **Rate limit: 10 agents per user.**
 - **Plain text only.** No HTML. Eliminates phishing with spoofed buttons/forms.
 - **Mandatory footer.** Every outbound email branded as sixel-mail. Not removable by agent.
-- **Auto-disable on SES complaint.** If recipient marks as spam, disable agent.
+- **Auto-disable on complaint.** If recipient marks as spam, disable agent.
 - **Stripe identity trail.** Every account has a payment on file.
 - **One recipient per agent.** Can't blast.
 - **$0.01/message.** 10,000 spam emails = $100.
@@ -826,11 +823,11 @@ We cannot solve this. It is the same boundary every email-dependent system opera
 
 ## External Intrusion
 
-- 2FA on all accounts: Fly.io, AWS, Stripe, Supabase, GitHub, registrar.
+- 2FA on all accounts: Fly.io, Cloudflare, Stripe, Supabase, GitHub, Resend, registrar.
 - No SSH to production. Deploy only via `fly deploy`.
-- Least-privilege IAM (SES send only).
+- Least-privilege API tokens (scoped Cloudflare, scoped Resend).
 - Domain registrar transfer lock.
-- SNS signature verification on inbound webhooks.
+- Cloudflare Worker auth on inbound webhooks.
 - Secrets as Fly.io secrets (encrypted at rest, never in code).
 - Minimal dependencies. `pip audit` in CI.
 
@@ -850,7 +847,7 @@ We cannot solve this. It is the same boundary every email-dependent system opera
 - [ ] Rate limit: 120 polls/min per agent
 - [ ] HTTPS only
 - [ ] 2FA on all infrastructure accounts
-- [ ] Least-privilege IAM
+- [ ] Least-privilege access on all services
 - [ ] Plain text email only
 - [ ] Mandatory footer on all outbound
 - [ ] Domain registrar transfer lock
@@ -858,8 +855,8 @@ We cannot solve this. It is the same boundary every email-dependent system opera
 **Should-have (first month):**
 - [ ] Key rotation endpoint
 - [ ] Register `sm_live_` with GitHub secret scanning
-- [ ] Auto-disable agent on SES complaint
-- [ ] SPF/DKIM soft-fail warning in body
+- [ ] Auto-disable agent on Resend complaint/bounce webhook
+- [x] SPF/DKIM soft-fail warning in body (handled by Cloudflare DMARC enforcement)
 - [ ] `pip audit` in CI
 - [ ] Basic request logging (not message content)
 
@@ -945,54 +942,33 @@ The product dogfoods its own marketing — sixel uses sixel-mail to email you ab
 
 ---
 
-# Part 5: Build Order
+# Part 5: Build History
+
+*What we actually built and when. Originally a plan; now a record. Infrastructure has since changed — SES replaced by Resend (outbound) and Cloudflare (inbound). See Parts 2 and 7 for current architecture.*
 
 ### Phase 1: Can an agent send me an email? (Day 1)
-1. Set up SES, verify domain, add DNS records.
-2. Request SES production access immediately.
-3. Create FastAPI app with `POST /v1/send`.
-4. Hardcode everything — no auth, no credits, no DB.
-5. `curl` it. Get an email.
+SES domain verification, DNS records, FastAPI `POST /v1/send`. Hardcoded everything. First email delivered.
 
 ### Phase 2: Can I reply? (Day 1-2)
-1. Set up SES inbound + SNS topic.
-2. Add `POST /webhooks/ses` endpoint.
-3. Store messages in DB (set up Supabase, run migrations).
-4. Add `GET /v1/inbox` endpoint.
-5. Send from curl, reply from Gmail, poll from curl. End-to-end works.
+SES inbound via SNS topic → webhook. Supabase DB. `GET /v1/inbox`. First end-to-end round-trip.
 
 ### Phase 3: Auth and credits (Day 2-3)
-1. API key generation + validation.
-2. Credit balance tracking + atomic deduction.
-3. 402 response when out of credits.
+API key generation + validation. Credit balance tracking + atomic deduction.
 
 ### Phase 4: Signup and payment (Day 3-4)
-1. GitHub OAuth flow.
-2. Signup page (single HTML file).
-3. Stripe Checkout integration.
-4. Payment webhook to add credits.
-6. Full flow: sign up → pay → get API key → send email.
+GitHub OAuth. Signup page. Stripe Checkout scaffolding. Full flow: sign up → pay → API key → send.
 
 ### Phase 5: Heartbeat and email UI (Day 4-5)
-1. Update `last_seen_at` on every poll.
-2. Heartbeat checker background task.
-3. Agent down / agent back emails.
-4. Email footer with signed URL links.
-5. Alert control endpoint + confirmation page.
+Heartbeat via `last_seen_at`. Agent down/back emails. Signed URL footer links. Alert controls.
 
 ### Phase 6: Account page (Day 5-6)
-1. Account page: status, credits, key management, messages, billing.
-2. Key rotation endpoint.
-3. Credit refill links.
+Account page, key rotation, credit refill links.
 
 ### Phase 7: Polish and security (Day 6-7)
-1. Low balance warning emails.
-2. Inbound SPF/DKIM/DMARC enforcement.
-3. Rate limiting.
-4. Error handling, logging.
-5. SNS signature verification.
-6. Test with a real agent (Claude Code).
-7. README / landing copy.
+SPF/DKIM/DMARC enforcement on inbound. Rate limiting. Error handling, logging.
+
+### Phase 8: Cloudflare migration + Resend (Day 10)
+Inbound moved to Cloudflare Email Routing → Email Worker → webhook. Outbound moved to Resend. AWS fully removed. TOTP encryption implemented. See Part 7.
 
 ---
 
@@ -1116,8 +1092,8 @@ Every box must be checked before launch.
 - [ ] Rotated key returns 401
 
 ### Webhook verification
-- [ ] Inbound webhook: valid Worker auth header accepted; invalid rejected
-- [ ] Inbound webhook: requests without auth header rejected
+- [x] Inbound webhook: valid Worker auth header accepted; invalid rejected
+- [x] Inbound webhook: requests without auth header rejected
 - [ ] Valid Stripe signature accepted; invalid rejected
 
 ### Signed URLs
@@ -1134,7 +1110,7 @@ Every box must be checked before launch.
 - [ ] TOTP-enabled agent: body encrypted before reaching our server
 - [ ] TOTP-enabled agent: message without TOTP code → forwarded plaintext (backwards compatible)
 - [ ] Outbound SPF record valid
-- [ ] Outbound DKIM signature valid
+- [x] Outbound DKIM signature valid (Resend, verified)
 - [ ] DMARC record published
 
 ### TOTP encryption
@@ -1161,24 +1137,26 @@ Every box must be checked before launch.
 ## 7. Infrastructure
 
 ### DNS
-- [ ] MX records → Cloudflare Email Routing
-- [ ] SPF TXT correct (includes Cloudflare)
-- [ ] DKIM CNAMEs correct
+- [x] MX records → Cloudflare Email Routing (`route1/2/3.mx.cloudflare.net`)
+- [x] DKIM records for Resend (verified)
+- [ ] SPF TXT includes Resend sending IPs
 - [ ] DMARC TXT published
-- [ ] Domain resolves to Fly.io
-- [ ] HTTPS certificate valid and auto-renewing
+- [x] Domain resolves to Fly.io
+- [x] HTTPS certificate valid and auto-renewing
 
 ### Cloudflare
-- [ ] Email Routing enabled for sixel.email
-- [ ] Email Worker deployed and active
-- [ ] Worker → webhook auth secret configured
-- [ ] KV namespace created with agent→contact mappings
-- [ ] DMARC enforcement confirmed (spoofed email rejected at SMTP)
+- [x] Email Routing enabled for sixel.email
+- [x] Email Worker deployed and active (`sixel-mail-inbound`)
+- [x] Worker → webhook auth secret configured
+- [x] KV namespace created with agent→contact mappings (`sixel-mail-agents`)
+- [x] Catch-all routing rule: `*@sixel.email` → Worker
+- [x] support@sixel.email → eterryphd@gmail.com forwarding
+- [ ] DMARC enforcement confirmed (spoofed email rejected at SMTP) — needs red team verification
 
-### SES (outbound only)
-- [ ] Sending quota sufficient (sandbox: 200/day, verified addresses only)
-- [ ] Bounce/complaint notifications configured
-- [ ] Domain verified
+### Resend (outbound)
+- [x] Domain verified (DKIM)
+- [ ] Bounce/complaint webhook configured
+- [ ] Sending limits understood (Resend free tier: 100/day, paid: 50K/mo)
 
 ### Database
 - [ ] All tables and indexes exist
@@ -1212,7 +1190,8 @@ Every box must be checked before launch.
 
 - [ ] Domain registrar transfer lock enabled
 - [ ] 2FA: Fly.io
-- [ ] 2FA: AWS
+- [ ] 2FA: Cloudflare
+- [ ] 2FA: Resend
 - [ ] 2FA: Stripe
 - [ ] 2FA: Supabase
 - [ ] 2FA: GitHub
@@ -1259,15 +1238,17 @@ If this works from your phone while away from your desk, ship it.
 
 ---
 
-# Part 7: Cloudflare Migration & TOTP Encryption
+# Part 7: Cloudflare Inbound Architecture & TOTP Encryption
 
-## Why
+*Migration completed 2026-02-10. AWS fully removed from the stack.*
 
-Our inbound email security has a structural problem. SES checks SPF/DKIM/DMARC but does not enforce — it delivers all email regardless of verdict. Both authentication (is the sender who they claim to be?) and authorization (is the sender allowed to talk to this agent?) are enforced solely in our Python webhook handler. One bug in that code and both checks fail.
+## Why We Moved
 
-This migration pushes both checks below our application layer.
+SES checked SPF/DKIM/DMARC but did not enforce — it delivered all email regardless of verdict. Both authentication (is the sender who they claim to be?) and authorization (is the sender allowed to talk to this agent?) were enforced solely in our Python webhook handler. One bug in that code and both checks failed.
 
-## New Inbound Architecture
+The migration pushed both checks below our application layer.
+
+## Current Inbound Architecture
 
 | Layer | Provider | Responsibility |
 |-------|----------|---------------|
@@ -1277,19 +1258,20 @@ This migration pushes both checks below our application layer.
 | 4. API | Our server (Fly.io) | Serves stored messages to agents. No change to interface. |
 | 5. Agent | Agent's local runtime | Reference client decrypts with TOTP, surfaces only verified messages. |
 
-## What Changes
+## What Changed (from SES)
 
-- **MX record**: `inbound-smtp.us-east-2.amazonaws.com` → Cloudflare's MX servers
-- **SPF TXT record**: update to include Cloudflare
+- **MX record**: now `route1/2/3.mx.cloudflare.net` (Cloudflare Email Routing) — completed 2026-02-10
+- **SPF TXT record**: updated to include Cloudflare
 - **SES receipt rule**: removed (SES no longer receives inbound)
 - **SNS topic**: removed
+- **AWS entirely removed**: no AWS credentials in the stack. Outbound migrated to Resend.
 - **Webhook handler**: simplified — no SNS signature verification, no SPF/DKIM/DMARC checking (Cloudflare handles both). Receives pre-processed payload from Email Worker.
-- **New: Cloudflare Email Worker**: JavaScript at Cloudflare edge. Checks allowed contact, handles TOTP encryption, forwards to our webhook.
-- **New: TOTP setup on agent creation**: Browser generates secret client-side, never touches server.
+- **Cloudflare Email Worker**: JavaScript at Cloudflare edge. Checks allowed contact, handles TOTP encryption, forwards to our webhook. Deployed and live.
+- **TOTP setup on agent creation**: Browser generates secret client-side, never touches server. Implemented.
 
-## What Doesn't Change
+## What Didn't Change
 
-- Outbound email (still SES, still sandbox for now)
+- Outbound email (Resend API, domain verified via DKIM)
 - API endpoints (same interface, body may be ciphertext)
 - Database schema (body column stores whatever the Worker forwarded)
 - Dashboard, payments, heartbeat
@@ -1312,6 +1294,148 @@ TOTP-based encryption with the Cloudflare Email Worker as the encryption boundar
 4. Cloudflare Email Worker extracts the TOTP code, encrypts the body with it, strips the code, forwards only ciphertext to our server.
 5. Our server stores ciphertext — never sees plaintext.
 6. Agent's reference client generates recent TOTP codes from the shared secret, tries each to decrypt. One works → message is authentic and readable. None work → alert sent, message discarded.
+
+### Key Distribution (setup, once)
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    User's Browser (setup page)                    │
+│                                                                   │
+│   JavaScript generates TOTP shared secret client-side             │
+│   Secret NEVER leaves the browser via network                     │
+│                                                                   │
+│   ┌─────────────┐              ┌──────────────────┐              │
+│   │  QR Code     │              │  Raw Secret Text  │             │
+│   │  (on screen) │              │  (on screen)      │             │
+│   └──────┬──────┘              └────────┬─────────┘              │
+│          │                              │                         │
+└──────────┼──────────────────────────────┼─────────────────────────┘
+           │ eyes → camera                │ eyes → clipboard
+           ▼                              ▼
+┌────────────────────┐         ┌────────────────────────┐
+│  Authenticator App  │         │  Agent Config File      │
+│  (phone)            │         │  (local machine)        │
+│                     │         │                         │
+│  Generates 6-digit  │         │  Generates 6-digit      │
+│  TOTP codes every   │         │  TOTP codes to attempt  │
+│  30 seconds         │         │  decryption             │
+└────────────────────┘         └────────────────────────┘
+
+    HUMAN endpoint                  AGENT endpoint
+
+    The shared secret exists at these two endpoints and nowhere else.
+    Our server, database, and Cloudflare never possess the secret.
+```
+
+### Inbound Message Flow (per message)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Human writes email                                      │
+│                                                          │
+│  "Here are the DB creds: postgres://...                  │
+│   847291"  ← TOTP code from authenticator app            │
+│                                                          │
+│  Sees: plaintext + TOTP code                             │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+          ┌────────────▼─────────────┐
+          │  Gmail / mail provider    │
+          │  Sees: plaintext + code   │
+          └────────────┬─────────────┘
+                       │ SMTP
+          ┌────────────▼─────────────┐
+          │  Cloudflare Email Routing │
+          │  DMARC enforcement        │
+          │  Sees: plaintext + code   │
+          │  (rejects spoofed sender) │
+          └────────────┬─────────────┘
+                       │
+          ┌────────────▼──────────────────────────────────┐
+          │  Cloudflare Email Worker                       │
+          │                                                │
+          │  1. KV lookup: agent exists? sender allowed?   │
+          │  2. Extract "847291" from body                  │
+          │  3. Derive AES-256 key:                        │
+          │     PBKDF2(code, salt=agent+date) → 256-bit    │
+          │  4. Encrypt body (minus code line):             │
+          │     AES-256-GCM → iv + ciphertext + auth tag   │
+          │  5. Base64 encode                               │
+          │                                                │
+          │  Sees: plaintext briefly in Worker memory       │
+          │  Forwards: base64(iv + ciphertext + tag)        │
+          └────────────┬──────────────────────────────────┘
+                       │ HTTPS POST + shared secret
+          ┌────────────▼──────────────────────────────────┐
+          │  Our Server (Fly.io)                           │
+          │                                                │
+          │  Stores in database:                           │
+          │    body = "nK7x2mQ9f4...Rz8wA=="              │
+          │    encrypted = true                            │
+          │                                                │
+          │  Sees: ciphertext only. Cannot decrypt.        │
+          └────────────┬──────────────────────────────────┘
+                       │ GET /v1/inbox
+          ┌────────────▼──────────────────────────────────┐
+          │  Agent Reference Client (local)                │
+          │                                                │
+          │  Has: TOTP shared secret from setup            │
+          │  1. Generate TOTP codes for current ± N windows│
+          │     (e.g. 847291, 193847, 502916)              │
+          │  2. For each code:                              │
+          │     PBKDF2(code, salt=agent+date) → key        │
+          │     Attempt AES-256-GCM decrypt                │
+          │  3. One succeeds → plaintext recovered          │
+          │     "Here are the DB creds: postgres://..."    │
+          │     None succeed → alert human, discard msg    │
+          │                                                │
+          │  Sees: plaintext (after successful decryption)  │
+          │  Decryption IS authentication.                  │
+          └───────────────────────────────────────────────┘
+
+WHAT EACH PARTY SEES:
+
+  Human's mail provider:  plaintext + TOTP code
+  Cloudflare (SMTP):      plaintext + TOTP code (briefly, in memory)
+  Cloudflare Worker:      plaintext + TOTP code → ciphertext (briefly, in memory)
+  Our server:             ciphertext only ←── THIS IS THE POINT
+  Our database:           ciphertext only
+  Agent client:           ciphertext → plaintext (after local decryption)
+
+ATTACK SCENARIOS:
+
+  Server compromised:     attacker reads ciphertext → useless
+  Database breached:      attacker reads ciphertext → useless
+  Prompt injection email: no valid TOTP → decryption fails → agent discards
+  TOTP code intercepted:  decrypts ONE message, expires in 30s, no forward access
+  Cloudflare compromised: same trust boundary as Gmail (sees plaintext already)
+```
+
+### Outbound Flow (asymmetric — plaintext)
+
+```
+┌───────────────────────────┐
+│  Agent sends via API       │
+│  POST /v1/send             │
+│  body = plaintext          │
+└─────────────┬─────────────┘
+              │
+┌─────────────▼─────────────┐
+│  Our Server                │
+│  Sees: plaintext           │  ← known weakness
+│  Sends via Resend API      │
+└─────────────┬─────────────┘
+              │
+┌─────────────▼─────────────┐
+│  Human's Inbox             │
+│  Sees: plaintext           │
+└───────────────────────────┘
+
+  Outbound is NOT encrypted. Known, accepted asymmetry.
+  Server compromise → outbound messages readable.
+  Agent replies may leak context about encrypted inbound.
+  Future mitigation: static decrypt page at sixel.email/e
+```
 
 ### What This Achieves
 
@@ -1404,14 +1528,17 @@ When the Worker detects a TOTP code in the email body:
 When no TOTP code is found:
 - Forward plaintext: `{agent_address, from, subject, body: original_body, encrypted: false}`
 
-### DNS Changes
+### DNS (current)
 
 ```
-MX  @  → [Cloudflare MX servers] (priority 10)
-TXT @  → update SPF to include Cloudflare
+MX  @  → route1.mx.cloudflare.net (priority 84)
+MX  @  → route2.mx.cloudflare.net (priority 31)
+MX  @  → route3.mx.cloudflare.net (priority 73)
+A/AAAA @ → Fly.io
+DKIM records → Resend (verified)
 ```
 
-Remove: SES MX record, SNS topic, SES receipt rule.
+SES MX record, SNS topic, SES receipt rule — all removed.
 
 ---
 
