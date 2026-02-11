@@ -211,3 +211,22 @@ Management scripts in `~/redteam/vm/`:
 - `boot.sh [bg]` — start VM (foreground or background)
 - `provision.sh` — copy source + briefing into VM (already done)
 - `extract-results.sh` — pull `plan.md` and `log.md` from VM
+
+### 2026-02-10 (continued): Admin Panel
+
+Built `/admin/` panel for Eric. Three pages:
+- Dashboard: system stats (agents, online count, total messages, credits held), all agents table with status/credits/message counts, quick credit grant form
+- Agent detail: full config, last 50 messages, last 20 credit transactions, credit grant form
+- POST `/admin/credits`: add credits with audit trail via `add_credits()`
+
+Auth: existing GitHub OAuth session, restricted to `ADMIN_GITHUB_IDS = {6231816}` (Eric). Non-admins get 403. Unauthenticated users redirect to GitHub OAuth.
+
+Design choice: server-rendered HTML like the rest of the app. No JS framework, no API-first approach. Same monospace styling. The admin panel is an internal tool for one person — complexity is the enemy.
+
+### 2026-02-11: Supabase RLS Security Alert
+
+Supabase flagged all 6 tables (`users`, `agents`, `messages`, `api_keys`, `credit_transactions`, `_migrations`) with RLS disabled. This matters because Supabase exposes `public` schema via PostgREST — without RLS, anyone with the `anon` key could read/write data directly.
+
+Red team run 001 attacker actually tried this ("Supabase Direct Access") and got 401 — the anon key isn't publicly exposed. But it's still a misconfiguration.
+
+Fix: Migration `003_enable_rls.sql` — enables RLS on all tables with no permissive policies. Our backend uses the `service_role` connection string (bypasses RLS), so the app is unaffected. PostgREST access is now blocked.
