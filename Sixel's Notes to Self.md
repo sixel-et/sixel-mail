@@ -11,7 +11,8 @@ Operational briefing. For the thinking record, see `Sixel's Notebook.md`.
 Working:
 - Full signup flow (GitHub OAuth → agent creation → API key → TOTP setup)
 - Dashboard, API (send/inbox/rotate-key), heartbeat monitoring, rate limiting
-- Email sending via SES (sandbox — verified addresses only)
+- Admin panel at /admin/ (stats, agent management, credit grants — Eric-only)
+- Email sending via Resend (built on SES, DKIM verified)
 - Email receiving via Cloudflare Email Routing → Worker → webhook (live)
 - TOTP encryption option on agent setup
 - Auto-migration on app startup
@@ -22,14 +23,19 @@ Not yet working: Stripe payments, attachment support, low balance warnings.
 
 ## What's Next
 
-1. **Red team stress test** — VM built and provisioned at `~/redteam/vm/`. Needs: Eric runs `claude login` inside VM, then launch. Scripts: `boot.sh bg`, SSH in, `claude`. See `~/redteam/attacker/CLAUDE.md` for attacker briefing.
-2. **Remove `/webhooks/ses` dead code** — SES endpoint is no longer needed
-3. **Add SPF record for Resend** — DKIM verified but SPF TXT may be incomplete
-4. **Stripe account setup**
-5. **Promo code / invite system** — for xAI colleagues
-6. **Admin backend** — credit management, agent management
-7. ~~**support@sixel.email**~~ — done (Cloudflare Email Routing → Gmail)
-8. **Attachment support** — outbound PDF, inbound S3
+1. **TOTP end-to-end test** — code fixed (Worker await, client date logic), needs real email test with Eric
+2. **Red team run 002** — post-fix, verify Cloudflare pipeline holds. Plan at `~/redteam/PLAN.md`.
+3. **Stripe account setup**
+4. **Promo code / invite system** — for xAI colleagues
+5. **Attachment support** — outbound PDF, inbound S3
+
+Done recently:
+- ~~Red team run 001~~ — critical SNS forgery found, all vulns patched same day (2026-02-10)
+- ~~Remove `/webhooks/ses`~~ — removed and deployed (2026-02-10)
+- ~~OpenAPI docs~~ — disabled in production (2026-02-10)
+- ~~DMARC p=reject~~ — DNS confirmed (2026-02-10)
+- ~~Admin panel~~ — built and deployed at /admin/ (2026-02-10)
+- ~~support@sixel.email~~ — Cloudflare Email Routing → Gmail (2026-02-10)
 
 ---
 
