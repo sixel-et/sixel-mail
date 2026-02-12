@@ -4,37 +4,53 @@ Operational briefing. For the thinking record, see `Sixel's Notebook.md`.
 
 ---
 
-## Current State (2026-02-10)
+## Current State (2026-02-12)
 
 **Live at https://sixel.email**
 
 Working:
 - Full signup flow (GitHub OAuth → agent creation → API key → TOTP setup)
-- Dashboard, API (send/inbox/rotate-key), heartbeat monitoring, rate limiting
+- Dashboard with key rotation + TOTP enable/disable
+- API (send/inbox/rotate-key), heartbeat monitoring, rate limiting
 - Admin panel at /admin/ (stats, agent management, credit grants — Eric-only)
 - Email sending via Resend (built on SES, DKIM verified)
 - Email receiving via Cloudflare Email Routing → Worker → webhook (live)
-- TOTP encryption option on agent setup
+- TOTP encryption: end-to-end tested, encrypts and decrypts successfully
+- Client rejects unencrypted messages when TOTP is enabled (defense-in-depth)
 - Auto-migration on app startup
 
+Partially working:
+- **Worker TOTP rejection**: Code written but NOT deployed — Eric needs to run `cd ~/sixel-mail/cf-worker && npx wrangler deploy`. My CF token doesn't have Worker deploy scope.
+- **TOTP code extraction**: Currently checks first/last line of email body. Breaks with Gmail reply quoting (quoted text appears after the code, pushing it to the middle). Eric said "we'll have to rethink."
+
 Not yet working: Stripe payments, attachment support, low balance warnings.
+
+### My Agent Credentials
+- API key: `sm_live_h3SHfQsERz5wzO2fzk879a9TDstEGhiNOrKOQn3SqjI` (also at `/home/sixel/sixel_api_key.txt`)
+- TOTP secret: `SHM44LYV7R5B7YF75XPOZQXKD46XOGS4` (also at `/home/sixel/totp_secret.txt`)
+- Address: sixel@sixel.email, allowed contact: eterryphd@gmail.com
+- Credits: ~190 remaining
 
 ---
 
 ## What's Next
 
-1. **TOTP end-to-end test** — code fixed (Worker await, client date logic), needs real email test with Eric
-2. **Red team run 002** — post-fix, verify Cloudflare pipeline holds. Plan at `~/redteam/PLAN.md`.
-3. **Stripe account setup**
-4. **Promo code / invite system** — for xAI colleagues
-5. **Attachment support** — outbound PDF, inbound S3
+1. **Deploy Worker update** — Eric needs to run `cd ~/sixel-mail/cf-worker && npx wrangler deploy` to enforce TOTP rejection at edge
+2. **Rethink TOTP UX** — Gmail reply quoting breaks code detection. Options: strip quoted text in Worker, scan all lines for 6-digit codes, or different approach entirely. Eric wants to discuss.
+3. **Red team run 002** — post-fix, verify Cloudflare pipeline holds. Plan at `~/redteam/PLAN.md`.
+4. **Stripe account setup**
+5. **Promo code / invite system** — for xAI colleagues
+6. **Attachment support** — outbound PDF, inbound S3
 
 Done recently:
+- ~~TOTP end-to-end test~~ — successfully tested encryption/decryption (2026-02-12)
+- ~~Account wipe + fresh setup~~ — wiped sixel agent, recreated from scratch (2026-02-12)
+- ~~Dashboard: key rotation + TOTP management~~ — POST /account/rotate-key, enable/disable-totp (2026-02-12)
+- ~~Client security fix~~ — discard unencrypted messages when TOTP enabled (2026-02-12)
+- ~~Worker TOTP rejection code~~ — written but not deployed (2026-02-12)
+- ~~Poller rewrite~~ — uses reference client directly, saves to /tmp/sixel-inbox.json (2026-02-12)
 - ~~Red team run 001~~ — critical SNS forgery found, all vulns patched same day (2026-02-10)
-- ~~Remove `/webhooks/ses`~~ — removed and deployed (2026-02-10)
-- ~~OpenAPI docs~~ — disabled in production (2026-02-10)
-- ~~DMARC p=reject~~ — DNS confirmed (2026-02-10)
-- ~~Admin panel~~ — built and deployed at /admin/ (2026-02-10)
+- ~~Cloudflare migration~~ — full pipeline live (2026-02-10)
 - ~~support@sixel.email~~ — Cloudflare Email Routing → Gmail (2026-02-10)
 
 ---
@@ -43,9 +59,9 @@ Done recently:
 
 1. Read this file
 2. Read the notebook if you need context on why things are the way they are
-3. Check inbox: `curl -s -H "Authorization: Bearer $(cat ~/.config/sixel/sixel_api_key)" https://sixel.email/v1/inbox`
-4. If Eric sent something, read it before doing anything else
-5. Start background poller: `/tmp/sixel-poll.sh` (polls every 60s). Seed `/tmp/sixel-seen-ids` first.
+3. **Use the reference client, not raw curl.** Never read the inbox in the plain.
+4. Start background poller: `/tmp/sixel-wait-for-mail.sh` (uses reference client, polls every 60s, exits on new message). Seed `/tmp/sixel-seen-ids` with already-read message IDs first.
+5. If Eric sent something, read it from `/tmp/sixel-inbox.json` before doing anything else.
 
 ---
 
