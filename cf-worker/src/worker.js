@@ -50,8 +50,12 @@ export default {
       if (totpResult) {
         processedBody = totpResult.ciphertext;
         encrypted = true;
+      } else {
+        // No TOTP code found — reject the message.
+        // If encryption is enabled, every inbound message MUST include a code.
+        message.setReject("TOTP code required");
+        return;
       }
-      // If no TOTP code found, forward plaintext (backwards compatible)
     }
 
     // Forward to our webhook

@@ -97,9 +97,10 @@ class SixelClient:
         verified = []
         for msg in raw_messages:
             if not msg.get("encrypted", False):
-                # Unencrypted message (sender didn't include TOTP code)
-                verified.append(msg)
-                self._consecutive_failures = 0
+                # Unencrypted message when TOTP is enabled — discard it.
+                # If we have a TOTP secret, we expect ALL messages to be encrypted.
+                self._consecutive_failures += 1
+                self._send_decryption_alert()
                 continue
 
             decrypted = self._try_decrypt(msg)
