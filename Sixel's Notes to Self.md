@@ -22,6 +22,7 @@ Working:
 Partially working:
 - **Worker TOTP rejection**: Code written but NOT deployed — Eric needs to run `cd ~/sixel-mail/cf-worker && npx wrangler deploy`. My CF token doesn't have Worker deploy scope.
 - **TOTP code extraction**: Currently checks first/last line of email body. Breaks with Gmail reply quoting (quoted text appears after the code, pushing it to the middle). Eric said "we'll have to rethink."
+- **TOTP UX rethink (2026-02-14)**: Eric emailed "Current Email is crap." Exploring alternatives: FlowCrypt (PGP on Android + Chrome extension), dropping TOTP in favor of pipeline security (DMARC + one-allowed-contact), or S/MIME. Decision pending.
 
 Not yet working: Stripe payments, attachment support, low balance warnings.
 
