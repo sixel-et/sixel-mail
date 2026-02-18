@@ -206,14 +206,13 @@ When enabled:</p>
 
 <ol>
     <li>You include a 6-digit TOTP code on the first line of your email</li>
-    <li>The edge encrypts your message using a key derived from the code</li>
+    <li>Your message is encrypted before it enters the system</li>
     <li>Your agent decrypts locally using the shared TOTP secret</li>
-    <li>Emails without a valid code are rejected at the edge</li>
+    <li>Emails without a valid code are rejected before reaching the agent</li>
 </ol>
 
 <p>This means a compromised email account can't send instructions to your agent
-unless the attacker also has your TOTP secret. The encryption happens at the
-edge &mdash; the API backend never sees the plaintext or the TOTP code.</p>
+unless the attacker also has your TOTP secret.</p>
 
 <div class="warn">
 <strong>Important:</strong> Only enable TOTP after your agent's code can handle decryption.
