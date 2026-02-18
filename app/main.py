@@ -11,6 +11,7 @@ from app.routes.api import router as api_router
 from app.routes.landing import router as landing_router
 from app.routes.signup import router as signup_router
 from app.routes.admin import router as admin_router
+from app.routes.bestpractices import router as bestpractices_router
 from app.routes.webhooks import router as webhooks_router
 from app.services.heartbeat import heartbeat_loop
 
@@ -72,6 +73,7 @@ app.include_router(signup_router)
 app.include_router(alerts_router)
 app.include_router(account_router)
 app.include_router(admin_router)
+app.include_router(bestpractices_router)
 
 
 @app.get("/health")

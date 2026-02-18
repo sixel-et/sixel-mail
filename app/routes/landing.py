@@ -82,7 +82,8 @@ POST  /v1/rotate-key   Rotate the API key</pre>
 <a href="/auth/github" class="cta">Sign up / Log in with GitHub</a>
 
 <div class="footer">
-    <p>Built by <a href="https://github.com/sixel-et">sixel-et</a></p>
+    <p><a href="/best-practices">Best practices</a> &mdash;
+    Built by <a href="https://github.com/sixel-et">sixel-et</a></p>
 </div>
 
 </body></html>"""
