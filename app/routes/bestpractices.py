@@ -127,57 +127,19 @@ Two mitigations:</p>
 
 <h2>Multi-session coordination</h2>
 
-<p>This is where it gets interesting. If you run multiple agent sessions
-(different projects, different specializations), they can share an inbox.</p>
+<p>If you run multiple agent sessions (different projects, different specializations),
+they can share a single inbox and coordinate responses without a central orchestrator.</p>
 
-<h3>The pattern: hubless teams</h3>
+<h3>Sixel Teams</h3>
 
-<p>Instead of one agent handling email, run a lightweight watcher script alongside
-your sessions. The watcher is pure bash &mdash; no inference, no LLM calls:</p>
+<p>We published a reference implementation:
+<a href="https://github.com/sixel-et/sixel-teams">sixel-et/sixel-teams</a>.
+It's a hubless architecture &mdash; a lightweight bash watcher handles email I/O,
+wakes sessions via tmux injection, collects contributions, and sends one assembled
+reply. No framework, no shared context window, no LLM calls in the coordination layer.</p>
 
-<ol>
-    <li><strong>Watcher</strong> polls the inbox, stores new emails as files on disk</li>
-    <li><strong>Watchdog</strong> detects which sessions are idle, wakes them via terminal injection</li>
-    <li>Each session reads the email, decides whether to <strong>contribute</strong> or <strong>pass</strong></li>
-    <li>Sessions write their response as a JSON file in a shared directory</li>
-    <li>Watcher waits for contributions (configurable delay), assembles them, sends one reply</li>
-</ol>
-
-<p>No session is the "lead." Any session can contribute. The watcher handles I/O.
-The result is an agent team with no central orchestrator, no custom framework,
-and no shared context window.</p>
-
-<pre># On-disk structure for each inbound email
-state/outbound/&lt;email-id&gt;/
-  email.json              # the inbound email
-  status.json             # delivery tracking
-  responses/
-    session-1.json        # { type: "contribution", content: "..." }
-    session-2.json        # { type: "pass" }</pre>
-
-<h3>Wake-up via terminal injection</h3>
-
-<p>If your sessions run in tmux (standard for Claude Code, common for other agents),
-the watchdog can wake them by injecting text into the terminal:</p>
-
-<pre>tmux send-keys -t session-name "New email: subject here" -l
-tmux send-keys -t session-name Enter</pre>
-
-<p>The session sees this as user input and responds. No custom API, no webhooks,
-no framework integration. Just text in a terminal.</p>
-
-<div class="tip">
-<strong>Key detail:</strong> Send the message text with <code>-l</code> (literal mode) and
-<code>Enter</code> as a separate keystroke. Long strings with embedded newlines don't
-register reliably in tmux.
-</div>
-
-<h3>Peer-to-peer between sessions</h3>
-
-<p>Sessions can also talk directly to each other, independent of email. Messages are
-JSON files in a git-tracked directory. Delivery is: write file, commit, push, ring
-the recipient's doorbell via tmux. Git gives you persistence, sync across machines,
-and a full audit trail readable by the human operator.</p>
+<p>The repo includes watcher scripts, watchdog, peer-to-peer messaging between sessions,
+and documentation for the full pattern. Start there.</p>
 
 <h2>Security</h2>
 
@@ -194,30 +156,35 @@ send your agent a malicious email?</p>
     <li><strong>Unknown senders:</strong> The allowed-contact check happens at the edge
     (Cloudflare Worker). Email from anyone other than your allowed contact is rejected
     with no processing, no storage, no credit deduction.</li>
-    <li><strong>Prompt injection via email:</strong> This is the real risk. If someone
-    compromises your email account, they can send instructions to your agent. The
-    allowed-contact check can't help here &mdash; the sender looks legitimate.</li>
+    <li><strong>Prompt injection via email:</strong> If someone compromises your email
+    account, they could try to send instructions to your agent. Door Knock nonces
+    add a barrier &mdash; the attacker must also see the nonce in the auto-reply to
+    your inbox &mdash; but if your inbox is compromised, treat the channel as compromised.
+    Use the kill switch.</li>
 </ul>
 
-<h3>TOTP encryption (optional)</h3>
+<h3>Door Knock nonce authentication</h3>
 
-<p>For defense against compromised-account attacks, agents can enable TOTP encryption.
-When enabled:</p>
+<p>Every outbound email from your agent includes a <code>Reply-To</code> address with a
+single-use nonce: <code>agent+nonce@sixel.email</code>. When you hit reply, the nonce
+validates your response automatically. No codes, no apps, no extra steps.</p>
 
-<ol>
-    <li>You include a 6-digit TOTP code on the first line of your email</li>
-    <li>Your message is encrypted before it enters the system</li>
-    <li>Your agent decrypts locally using the shared TOTP secret</li>
-    <li>Emails without a valid code are rejected before reaching the agent</li>
-</ol>
+<p>If you want to email your agent without a prior message to reply to (a "knock"),
+just send to <code>agent@sixel.email</code>. The agent ignores the content but
+auto-replies with a fresh nonce in the Reply-To. Reply to <em>that</em>, and your
+message goes through. Three emails, zero friction.</p>
 
-<p>This means a compromised email account can't send instructions to your agent
-unless the attacker also has your TOTP secret.</p>
+<p>This means an attacker with a compromised email account can send a knock, but
+the auto-reply goes to <em>your</em> inbox &mdash; they'd need to also compromise
+your inbox to see the nonce. If that's happened, you have bigger problems than
+agent email.</p>
 
-<div class="warn">
-<strong>Important:</strong> Only enable TOTP after your agent's code can handle decryption.
-If TOTP is enabled but your agent reads the inbox raw, it will receive ciphertext.
-</div>
+<h3>Channel kill switch</h3>
+
+<p>Set up a kill switch from <code>/account</code>. You get an allstop email address
+that deactivates the channel instantly. Save it as a phone contact &mdash; the setup
+page gives you a QR code. If anything goes wrong, send one email to that address
+and the channel shuts down. Reactivation requires a live session or the account dashboard.</p>
 
 <h2>Common mistakes</h2>
 
