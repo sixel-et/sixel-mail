@@ -15,76 +15,67 @@ import { EmailMessage } from "cloudflare:email";
 
 export default {
   async email(message, env, ctx) {
-    const from = message.from;
-    const to = message.to;
+    try {
+      const from = message.from;
+      const to = message.to;
+      console.log(`Email received: from=${from}, to=${to}`);
 
-    // Extract local part from recipient address, handle + addressing for nonces
-    const fullLocal = to.split("@")[0].toLowerCase();
-    const plusIndex = fullLocal.indexOf("+");
-    const agentAddress = plusIndex !== -1 ? fullLocal.substring(0, plusIndex) : fullLocal;
-    const noncePart = plusIndex !== -1 ? fullLocal.substring(plusIndex + 1) : null;
+      // Extract local part from recipient address, handle + addressing for nonces
+      // Only lowercase the agent address — nonces are case-sensitive (base64url)
+      const fullLocal = to.split("@")[0];
+      const plusIndex = fullLocal.indexOf("+");
+      const agentAddress = (plusIndex !== -1 ? fullLocal.substring(0, plusIndex) : fullLocal).toLowerCase();
+      const noncePart = plusIndex !== -1 ? fullLocal.substring(plusIndex + 1) : null;
+      console.log(`Parsed: agent=${agentAddress}, nonce=${noncePart ? 'present' : 'none'}`);
 
-    // Look up agent in KV (using base address, without + portion)
-    const agentData = await env.AGENTS.get(agentAddress, { type: "json" });
-    if (!agentData) {
-      // Unknown agent — reject
-      message.setReject("Unknown recipient");
-      return;
-    }
-
-    // Check allowed contact
-    const senderEmail = extractEmail(from).toLowerCase();
-    if (senderEmail !== agentData.allowed_contact) {
-      // Sender not allowed — reject silently
-      message.setReject("Sender not authorized");
-      return;
-    }
-
-    // Parse the email to extract subject and body
-    const rawEmail = await streamToString(message.raw);
-    const { subject, body } = parseEmail(rawEmail);
-
-    // Check if TOTP encryption is needed
-    let processedBody = body;
-    let encrypted = false;
-
-    if (agentData.has_totp) {
-      const totpResult = await extractAndEncrypt(body, agentAddress);
-      if (totpResult) {
-        processedBody = totpResult.ciphertext;
-        encrypted = true;
-      } else {
-        // No TOTP code found — reject the message.
-        // If encryption is enabled, every inbound message MUST include a code.
-        message.setReject("TOTP code required");
+      // Look up agent in KV (using base address, without + portion)
+      const agentData = await env.AGENTS.get(agentAddress, { type: "json" });
+      if (!agentData) {
+        console.log(`Unknown agent: ${agentAddress}`);
+        message.setReject("Unknown recipient");
         return;
       }
-    }
 
-    // Forward to our webhook (include nonce if present from + addressing)
-    const payload = {
-      agent_address: agentAddress,
-      from: senderEmail,
-      subject: subject,
-      body: processedBody,
-      encrypted: encrypted,
-    };
-    if (noncePart) {
-      payload.nonce = noncePart;
-    }
+      // Check allowed contact
+      const senderEmail = extractEmail(from).toLowerCase();
+      if (senderEmail !== agentData.allowed_contact) {
+        console.log(`Sender ${senderEmail} not allowed (expected ${agentData.allowed_contact})`);
+        message.setReject("Sender not authorized");
+        return;
+      }
 
-    const response = await fetch(env.WEBHOOK_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Worker-Auth": env.WORKER_AUTH_SECRET,
-      },
-      body: JSON.stringify(payload),
-    });
+      // Parse the email to extract subject and body
+      const rawEmail = await streamToString(message.raw);
+      const { subject, body } = parseEmail(rawEmail);
+      console.log(`Parsed email: subject="${subject}", body_length=${body.length}`);
 
-    if (!response.ok) {
-      const text = await response.text();
-      console.error(`Webhook returned ${response.status}: ${text}`);
+      // Forward to our webhook (include nonce if present from + addressing)
+      const payload = {
+        agent_address: agentAddress,
+        from: senderEmail,
+        subject: subject,
+        body: body,
+        encrypted: false,
+      };
+      if (noncePart) {
+        payload.nonce = noncePart;
+      }
+
+      console.log(`Forwarding to webhook: ${env.WEBHOOK_URL}`);
+      const response = await fetch(env.WEBHOOK_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Worker-Auth": env.WORKER_AUTH_SECRET,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const responseText = await response.text();
+      console.log(`Webhook response: ${response.status} ${responseText}`);
+    } catch (err) {
+      console.error(`Worker error: ${err.message}\n${err.stack}`);
+      message.setReject("Internal error");
     }
   },
 };
