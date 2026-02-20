@@ -7,6 +7,7 @@ from app.db import get_pool
 from app.ratelimit import POLL_LIMIT, POLL_WINDOW, SEND_LIMIT, SEND_WINDOW, limiter
 from app.services.credits import deduct_credit
 from app.services.email import build_footer, send_email
+from app.services.nonce import build_reply_to, generate_nonce
 
 router = APIRouter(prefix="/v1")
 
@@ -83,11 +84,16 @@ async def send_message(req: SendRequest, agent_id: str = Depends(get_agent_id)):
     footer = build_footer(agent["address"], new_balance)
     full_body = req.body + footer
 
+    # Generate nonce for reply-to validation
+    nonce = await generate_nonce(pool, agent_id)
+    reply_to = build_reply_to(agent["address"], nonce)
+
     await send_email(
         from_address=from_addr,
         to_address=agent["allowed_contact"],
         subject=f"[{agent['address']}] {req.subject}",
         body=full_body,
+        reply_to=reply_to,
     )
 
     row = await pool.fetchrow(
@@ -139,11 +145,15 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
             "UPDATE agents SET agent_down_notified = FALSE WHERE id = $1",
             agent_id,
         )
+        # System emails also get nonces (no credit deduction for the nonce itself)
+        recovery_nonce = await generate_nonce(pool, agent_id)
+        recovery_reply_to = build_reply_to(agent["address"], recovery_nonce)
         await send_email(
             from_address=f"{agent['address']}@{settings.mail_domain}",
             to_address=agent["allowed_contact"],
             subject=f"[{agent['address']}] is back online",
             body=f"Your agent {agent['address']}@{settings.mail_domain} is responding again.",
+            reply_to=recovery_reply_to,
         )
 
     # Fetch unread inbound messages

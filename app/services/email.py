@@ -7,17 +7,33 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-async def send_email(from_address: str, to_address: str, subject: str, body: str):
+async def send_email(
+    from_address: str,
+    to_address: str,
+    subject: str,
+    body: str,
+    reply_to: str | None = None,
+):
     """Send an email via Resend."""
     if not settings.resend_api_key:
         logger.info(
-            "MOCK EMAIL: from=%s to=%s subject=%s body=%s",
+            "MOCK EMAIL: from=%s to=%s reply_to=%s subject=%s body=%s",
             from_address,
             to_address,
+            reply_to,
             subject,
             body[:200],
         )
         return
+
+    payload = {
+        "from": from_address,
+        "to": [to_address],
+        "subject": subject,
+        "text": body,
+    }
+    if reply_to:
+        payload["reply_to"] = reply_to
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -26,12 +42,7 @@ async def send_email(from_address: str, to_address: str, subject: str, body: str
                 "Authorization": f"Bearer {settings.resend_api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "from": from_address,
-                "to": [to_address],
-                "subject": subject,
-                "text": body,
-            },
+            json=payload,
         )
         if resp.status_code != 200:
             logger.error("Resend API error: %s %s", resp.status_code, resp.text)

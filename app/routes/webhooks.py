@@ -1,5 +1,6 @@
 import hmac
 import logging
+import time
 
 import stripe
 from fastapi import APIRouter, HTTPException, Request
@@ -7,9 +8,32 @@ from fastapi import APIRouter, HTTPException, Request
 from app.config import settings
 from app.db import get_pool
 from app.services.credits import add_credits, deduct_credit
+from app.services.email import build_footer, send_email
+from app.services.nonce import build_reply_to, generate_nonce, validate_nonce
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks")
+
+
+# --- Knock rate limiting (in-memory, per-agent) ---
+# Tracks recent knock timestamps per agent. Simple sliding window.
+_knock_timestamps: dict[str, list[float]] = {}
+KNOCK_RATE_LIMIT = 10  # max knocks per window
+KNOCK_RATE_WINDOW = 60  # seconds
+
+
+def _check_knock_rate(agent_id: str) -> bool:
+    """Return True if knock is allowed, False if rate-limited."""
+    now = time.time()
+    timestamps = _knock_timestamps.get(agent_id, [])
+    # Prune old entries
+    timestamps = [t for t in timestamps if now - t < KNOCK_RATE_WINDOW]
+    if len(timestamps) >= KNOCK_RATE_LIMIT:
+        _knock_timestamps[agent_id] = timestamps
+        return False
+    timestamps.append(now)
+    _knock_timestamps[agent_id] = timestamps
+    return True
 
 
 # POST /webhooks/inbound — receive inbound email from Cloudflare Email Worker
@@ -20,7 +44,12 @@ async def cf_inbound(request: Request):
     The Worker has already:
     - Verified DMARC (Cloudflare Email Routing enforces at SMTP)
     - Checked allowed contact (Worker rejects non-allowed senders)
-    - Optionally encrypted the body with TOTP (if agent has TOTP enabled)
+    - Extracted nonce from + addressing (if present)
+
+    Flow:
+    - If nonce present and valid: authenticated message → store, deduct credit
+    - If no nonce from allowed contact: knock → reply with fresh nonce, no credit
+    - If no nonce from unknown sender: silent drop
     """
     # Verify the request is from our Worker
     auth_header = request.headers.get("X-Worker-Auth", "")
@@ -35,6 +64,7 @@ async def cf_inbound(request: Request):
     subject = body.get("subject", "")
     message_body = body.get("body", "")
     encrypted = body.get("encrypted", False)
+    nonce_str = body.get("nonce")  # Extracted by Worker from + addressing
 
     if not agent_address or not from_addr:
         raise HTTPException(status_code=400, detail="Missing required fields")
@@ -42,12 +72,20 @@ async def cf_inbound(request: Request):
     pool = await get_pool()
 
     agent = await pool.fetchrow(
-        "SELECT id, allowed_contact, credit_balance FROM agents WHERE address = $1",
+        "SELECT id, address, allowed_contact, credit_balance, channel_active "
+        "FROM agents WHERE address = $1",
         agent_address,
     )
     if not agent:
         logger.info("Inbound for unknown agent: %s", agent_address)
         return {"status": "dropped", "reason": "unknown_agent"}
+
+    agent_id = str(agent["id"])
+
+    # Check channel kill switch
+    if not agent["channel_active"]:
+        logger.info("Inbound dropped for %s (channel inactive)", agent_address)
+        return {"status": "dropped", "reason": "channel_inactive"}
 
     # Double-check allowed contact (defense in depth — Worker already checked)
     if from_addr.lower() != agent["allowed_contact"].lower():
@@ -57,25 +95,62 @@ async def cf_inbound(request: Request):
         )
         return {"status": "dropped", "reason": "sender_not_allowed"}
 
-    # Deduct credit
-    new_balance = await deduct_credit(pool, str(agent["id"]), "message_received")
-    if new_balance is None:
-        logger.info("Dropped inbound for %s (no credits)", agent_address)
-        return {"status": "dropped", "reason": "insufficient_credits"}
+    # --- NONCE VALIDATION PATH ---
+    if nonce_str:
+        validated_agent_id = await validate_nonce(pool, nonce_str)
+        if validated_agent_id is None:
+            logger.info("Invalid/expired nonce from %s for %s", from_addr, agent_address)
+            return {"status": "dropped", "reason": "invalid_nonce"}
 
-    # Store message (body may be ciphertext or plaintext — we don't care)
-    await pool.execute(
-        """
-        INSERT INTO messages (agent_id, direction, subject, body, is_read, encrypted)
-        VALUES ($1, 'inbound', $2, $3, FALSE, $4)
-        """,
-        agent["id"],
-        subject,
-        message_body,
-        encrypted,
+        if validated_agent_id != agent_id:
+            logger.warning("Nonce agent mismatch: nonce=%s, recipient=%s", validated_agent_id, agent_id)
+            return {"status": "dropped", "reason": "nonce_agent_mismatch"}
+
+        # Valid nonce — this is an authenticated message. Deduct credit.
+        new_balance = await deduct_credit(pool, agent_id, "message_received")
+        if new_balance is None:
+            logger.info("Dropped inbound for %s (no credits)", agent_address)
+            return {"status": "dropped", "reason": "insufficient_credits"}
+
+        # Store message
+        await pool.execute(
+            """
+            INSERT INTO messages (agent_id, direction, subject, body, is_read, encrypted)
+            VALUES ($1, 'inbound', $2, $3, FALSE, $4)
+            """,
+            agent["id"],
+            subject,
+            message_body,
+            encrypted,
+        )
+        logger.info("Authenticated message received for %s (nonce valid)", agent_address)
+        return {"status": "received"}
+
+    # --- KNOCK PATH (no nonce, from allowed contact) ---
+    if not _check_knock_rate(agent_id):
+        logger.warning("Knock rate limited for %s", agent_address)
+        return {"status": "dropped", "reason": "knock_rate_limited"}
+
+    # Generate fresh nonce and reply — no credit deduction
+    knock_nonce = await generate_nonce(pool, agent_id)
+    knock_reply_to = build_reply_to(agent["address"], knock_nonce)
+
+    from_email = f"{agent['address']}@{settings.mail_domain}"
+    footer = build_footer(agent["address"], agent["credit_balance"])
+
+    await send_email(
+        from_address=from_email,
+        to_address=agent["allowed_contact"],
+        subject=f"[{agent['address']}] Re: {subject}",
+        body=(
+            "Knock received. Reply to this email to send your message.\n"
+            "(This is an automated reply — your original message was not processed.)"
+            f"{footer}"
+        ),
+        reply_to=knock_reply_to,
     )
-
-    return {"status": "received"}
+    logger.info("Knock reply sent for %s (nonce issued)", agent_address)
+    return {"status": "knock_replied"}
 
 
 # POST /webhooks/stripe — handle Stripe Checkout completion

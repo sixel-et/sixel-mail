@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from app.db import close_pool, get_pool
 from app.routes.account import router as account_router
 from app.routes.alerts import router as alerts_router
+from app.routes.allstop import router as allstop_router
 from app.routes.api import router as api_router
 from app.routes.landing import router as landing_router
 from app.routes.signup import router as signup_router
@@ -73,6 +74,7 @@ app.include_router(signup_router)
 app.include_router(alerts_router)
 app.include_router(account_router)
 app.include_router(admin_router)
+app.include_router(allstop_router)
 app.include_router(bestpractices_router)
 
 

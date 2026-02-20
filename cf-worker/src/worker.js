@@ -18,10 +18,13 @@ export default {
     const from = message.from;
     const to = message.to;
 
-    // Extract local part from recipient address
-    const agentAddress = to.split("@")[0].toLowerCase();
+    // Extract local part from recipient address, handle + addressing for nonces
+    const fullLocal = to.split("@")[0].toLowerCase();
+    const plusIndex = fullLocal.indexOf("+");
+    const agentAddress = plusIndex !== -1 ? fullLocal.substring(0, plusIndex) : fullLocal;
+    const noncePart = plusIndex !== -1 ? fullLocal.substring(plusIndex + 1) : null;
 
-    // Look up agent in KV
+    // Look up agent in KV (using base address, without + portion)
     const agentData = await env.AGENTS.get(agentAddress, { type: "json" });
     if (!agentData) {
       // Unknown agent — reject
@@ -58,20 +61,25 @@ export default {
       }
     }
 
-    // Forward to our webhook
+    // Forward to our webhook (include nonce if present from + addressing)
+    const payload = {
+      agent_address: agentAddress,
+      from: senderEmail,
+      subject: subject,
+      body: processedBody,
+      encrypted: encrypted,
+    };
+    if (noncePart) {
+      payload.nonce = noncePart;
+    }
+
     const response = await fetch(env.WEBHOOK_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-Worker-Auth": env.WORKER_AUTH_SECRET,
       },
-      body: JSON.stringify({
-        agent_address: agentAddress,
-        from: senderEmail,
-        subject: subject,
-        body: processedBody,
-        encrypted: encrypted,
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {

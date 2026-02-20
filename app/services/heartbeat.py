@@ -3,6 +3,7 @@ import logging
 
 from app.db import get_pool
 from app.services.email import send_email
+from app.services.nonce import build_reply_to, generate_nonce
 from app.services.signing import sign_alert_url
 from app.config import settings
 
@@ -60,6 +61,10 @@ async def heartbeat_loop():
                     agent_id, address, credits, f"OFFLINE (last seen: {last_seen})"
                 )
 
+                # Generate nonce for alert reply-to (no credit deduction)
+                alert_nonce = await generate_nonce(pool, agent_id)
+                alert_reply_to = build_reply_to(address, alert_nonce)
+
                 await send_email(
                     from_address=f"{address}@{settings.mail_domain}",
                     to_address=contact,
@@ -69,6 +74,7 @@ async def heartbeat_loop():
                         f"{last_seen}."
                         f"{footer}"
                     ),
+                    reply_to=alert_reply_to,
                 )
 
                 await pool.execute(
