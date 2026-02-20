@@ -1,6 +1,7 @@
 name = "sixel-mail-inbound"
 main = "src/worker.js"
 compatibility_date = "2024-09-23"
+account_id = "16ba5057d0d3002e9b9531b40f79853e"
 
 [vars]
 WEBHOOK_URL = "https://sixel.email/webhooks/inbound"
