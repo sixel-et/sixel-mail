@@ -163,6 +163,8 @@ The human's email client is the monitoring dashboard. These are billable message
 
 All emails are **plain text only.** No HTML. URLs in plain text are automatically clickable in every major email client.
 
+Every outbound email includes a `Reply-To` header with a single-use nonce: `agent+nonce@sixel.email`. The human just hits reply — the nonce validates their response automatically. No codes, no apps.
+
 ### Agent → Human Message
 
 ```
@@ -306,7 +308,7 @@ Billing history:
   Jan 12 — $5.00 (500 messages) — Stripe
 ```
 
-Exists for: key rotation, changing allowed contact, checking balance without waiting for email, creating additional agents, message history, billing history.
+Exists for: key rotation, changing allowed contact, checking balance without waiting for email, creating additional agents, message history, billing history, kill switch setup + channel reactivation.
 
 ---
 
@@ -338,16 +340,14 @@ Additional payment rails (Square/Cash App Pay, crypto) deferred to post-MVP.
 1. Sign up with GitHub
 2. Pick agent email name: [________]@sixel.mail
 3. Enter your email: [________]
-4. TOTP setup (optional but recommended):
-   - Browser generates TOTP secret client-side (JavaScript)
-   - QR code displayed for authenticator app (Google Authenticator, Authy, etc.)
-   - Raw secret displayed for agent config [Copy]
-   - Secret NEVER sent to our server — generated and displayed entirely in browser
-5. Add $5 credit → Stripe Checkout
-6. Here's your API key: sm_live_a1b2c3d4...   [Copy]
-7. We sent a test email. Go mark it "not spam."
-8. Paste this into your agent:                 [Copy]
-   (includes API key + TOTP secret + reference client instructions)
+4. Add $5 credit → Stripe Checkout
+5. Here's your API key: sm_live_a1b2c3d4...   [Copy]
+6. We sent a test email. Go mark it "not spam."
+7. Paste this into your agent:                 [Copy]
+   (includes API key + endpoint + usage instructions)
+8. (Optional) Set up kill switch: /account → Setup Kill Switch
+   - Generates allstop email address for emergency channel shutdown
+   - QR code for saving to phone contacts
 9. That's it. You're done.
 ```
 
@@ -391,8 +391,8 @@ Nobody does this. Adjacent things:
 | Framework | **FastAPI** | Async. Auto-generates OpenAPI docs. No bloat. |
 | Database | **Supabase Postgres** | Free tier (500MB). Hosted. No ops. |
 | Email outbound | **Resend** | Built on SES infrastructure. Domain verified via DKIM. |
-| Email inbound | **Cloudflare Email Routing → Email Worker → webhook** | DMARC enforced at SMTP. Allowed-contact checked at edge. TOTP encryption before forwarding. |
-| Edge compute | **Cloudflare Email Workers** | Runs allowed-contact check + TOTP encryption at Cloudflare edge. |
+| Email inbound | **Cloudflare Email Routing → Email Worker → webhook** | DMARC enforced at SMTP. Allowed-contact checked at edge. Nonce extracted from `+` addressing. |
+| Edge compute | **Cloudflare Email Workers** | Runs allowed-contact check + nonce extraction at Cloudflare edge. |
 | Hosting | **Fly.io** | Single command deploy. $5/mo. HTTPS built-in. |
 | Payments (card) | **Stripe Checkout (one-time)** | Redirect, pay, webhook. No subscription logic. |
 | Payments (future) | Square / crypto | Deferred to post-MVP |
@@ -425,9 +425,9 @@ Nobody does this. Adjacent things:
 │ Worker (JS)         │                   │
 │ • Allowed-contact   │                   │
 │   check             │                   │
-│ • Extract TOTP code │                   │
-│ • Encrypt body      │                   │
-│ • Forward ciphertext│                   │
+│ • Extract nonce from│                   │
+│   + addressing      │                   │
+│ • Forward to webhook│                   │
 └─────────┬───────────┘                   │
           │ HTTPS POST                    │
           ▼                               │
@@ -438,12 +438,13 @@ Nobody does this. Adjacent things:
 │  GET  /v1/inbox         → return unread, update heartbeat │
 │  GET  /v1/inbox/:id     → return specific msg             │
 │  POST /v1/rotate-key    → new key, invalidate old         │
-│  POST /webhooks/inbound → store ciphertext from CF Worker │
+│  POST /webhooks/inbound → validate nonce / handle knock    │
 │  POST /webhooks/stripe  → handle card payment             │
 │                                                           │
 │  GET  /auth/github      → OAuth flow                      │
 │  GET  /alert/*          → handle signed URL clicks        │
 │  GET  /account          → account page                    │
+│  GET  /allstop          → emergency channel shutdown       │
 │                                                          │
 │  [Background] heartbeat_checker (every 60s)               │
 └─────────────────────────┬───────────────────────────────┘
@@ -456,12 +457,11 @@ Nobody does this. Adjacent things:
 ┌─────────────────────────────────────────────────────────┐
 │                  Agent (local runtime)                    │
 │                                                          │
-│  Reference Client (best practice):                       │
-│  • Pulls from /v1/inbox                                  │
-│  • Decrypts with TOTP codes (current ± N windows)        │
-│  • Surfaces only decrypted messages to agent              │
-│  • Sends alert on failed decryption                      │
-│  • Agent never sees raw/unverified content                │
+│  • POST /v1/send to email human (reply-to has nonce)     │
+│  • GET /v1/inbox to poll for replies (also heartbeat)    │
+│  • Human replies land with nonce-validated authenticity   │
+│  • No client-side crypto needed — nonce validates at     │
+│    server on inbound                                     │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -489,6 +489,8 @@ CREATE TABLE agents (
     alert_status TEXT DEFAULT 'active',    -- 'active', 'paused', 'muted'
     alert_mute_until TIMESTAMPTZ,          -- when mute/pause expires
     agent_down_notified BOOLEAN DEFAULT FALSE,
+    channel_active BOOLEAN DEFAULT TRUE,   -- kill switch: FALSE = all inbound dropped
+    allstop_key_hash TEXT,                 -- SHA-256 hash of pre-shared allstop key
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -519,10 +521,22 @@ CREATE TABLE credit_transactions (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
+CREATE TABLE nonces (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id UUID NOT NULL REFERENCES agents(id),
+    nonce TEXT NOT NULL UNIQUE,            -- 32-char base64url token (~192 bits entropy)
+    created_at TIMESTAMPTZ DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,       -- 30 minutes TTL
+    burned BOOLEAN DEFAULT FALSE,          -- single-use: burned on first validation
+    burned_at TIMESTAMPTZ
+);
+
 CREATE INDEX idx_messages_agent_unread ON messages(agent_id, is_read) WHERE direction = 'inbound';
 CREATE INDEX idx_agents_heartbeat ON agents(last_seen_at) WHERE alert_status = 'active';
 CREATE INDEX idx_agents_address ON agents(address);
 CREATE INDEX idx_api_keys_prefix ON api_keys(key_prefix);
+CREATE INDEX idx_nonces_nonce ON nonces(nonce);
+CREATE INDEX idx_nonces_agent_expires ON nonces(agent_id, expires_at);
 ```
 
 ---
@@ -562,11 +576,12 @@ Validation: extract prefix → look up by `key_prefix` → verify hash → retur
 ### POST /webhooks/inbound (from Cloudflare Email Worker)
 
 1. **Verify shared secret** (Worker includes auth header; confirms request is from our Worker, not arbitrary).
-2. Parse forwarded payload: `agent_address`, `from`, `subject`, `body` (ciphertext if TOTP-enabled, plaintext if not).
-3. Look up agent by address.
-4. Check `credit_balance >= 1`. If not, drop and notify human.
-5. Store message body directly (ciphertext or plaintext — server doesn't distinguish).
-6. Deduct 1 credit. Log transaction.
+2. Parse forwarded payload: `agent_address`, `from`, `subject`, `body`, `nonce` (extracted from `+` addressing by Worker).
+3. Look up agent by address. Check `channel_active` (kill switch).
+4. **All-stop check**: If nonce starts with `allstop-`, validate key hash → deactivate channel.
+5. **Nonce validation path** (nonce present): Validate nonce (single-use, not expired, matches agent). If valid → authenticated message. Deduct 1 credit, store message.
+6. **Knock path** (no nonce, from allowed contact): Rate-limit check (10/min per agent). Generate fresh nonce. Reply to allowed contact with nonce embedded in reply-to address (`agent+nonce@sixel.email`). No credit deduction — knocks are infrastructure.
+7. Invalid nonce or unknown sender → silent drop.
 
 Note: Allowed-contact check and DMARC enforcement happen upstream (Cloudflare Email Routing enforces DMARC at SMTP; Email Worker checks allowed contact). Our webhook is the third line of defense.
 
@@ -705,10 +720,12 @@ sixel-mail/
 │   │   ├── api.py            # /v1/send, /v1/inbox, /v1/inbox/:id, /v1/rotate-key
 │   │   ├── webhooks.py       # /webhooks/inbound (CF Worker), /webhooks/stripe
 │   │   ├── alerts.py         # /alert (signed URL handler + confirmation page)
-│   │   ├── account.py        # /account
+│   │   ├── account.py        # /account, /account/setup-allstop, /account/reactivate-channel
+│   │   ├── allstop.py        # /allstop (emergency channel shutdown via browser)
 │   │   └── signup.py         # /auth/github, /setup, /topup
 │   ├── services/
-│   │   ├── email.py          # Resend send + email templates + footer generation
+│   │   ├── email.py          # Resend send + email templates + footer generation (+ reply_to)
+│   │   ├── nonce.py          # Nonce generation, validation (atomic burn), reply-to building
 │   │   ├── credits.py        # Credit balance management
 │   │   ├── heartbeat.py      # Heartbeat checker background task
 │   │   └── signing.py        # HMAC URL signing/verification
@@ -796,8 +813,8 @@ Someone forges the allowed contact's email address. The email didn't come from t
 Mitigations (layered, defense in depth):
 1. **DMARC enforcement at SMTP** (Cloudflare Email Routing). Spoofed emails rejected before they reach our code.
 2. **Allowed-contact check at edge** (Cloudflare Email Worker). Wrong sender → rejected before reaching our server.
-3. **TOTP encryption** (optional). Even if layers 1 and 2 fail, the agent's reference client can't decrypt a message without a valid TOTP code → discards it.
-4. **Reply-chain validation (later).** Only accept replies to previous outbound messages.
+3. **Door Knock nonce validation.** Every inbound message must include a valid single-use nonce (embedded in the reply-to address). No nonce or invalid nonce → message dropped (or triggers knock flow if from allowed contact). Attacker must both spoof the sender AND possess a valid unexpired nonce.
+4. **Channel kill switch (all-stop).** Pre-shared key allows emergency channel deactivation via email or browser. Reactivation requires live session or dashboard access.
 5. **Documentation.** Tell developers: treat email replies like user input.
 
 ### Layer 2: Compromised sender account (not protectable by us)
@@ -839,7 +856,7 @@ We cannot solve this. It is the same boundary every email-dependent system opera
 - [ ] Cloudflare Email Worker auth on inbound webhook
 - [ ] DMARC enforcement at SMTP (Cloudflare Email Routing)
 - [ ] Allowed-contact check at edge (Cloudflare Email Worker)
-- [ ] TOTP encryption in Email Worker (for TOTP-enabled agents)
+- [x] Door Knock nonce validation on inbound (single-use, 30min TTL)
 - [ ] Atomic credit deduction
 - [ ] HMAC-signed alert URLs with expiration
 - [ ] Rate limit: 100 msgs/day per agent
@@ -862,7 +879,6 @@ We cannot solve this. It is the same boundary every email-dependent system opera
 
 **Later:**
 - [ ] True E2E encryption via `sixel.email/e` static page
-- [ ] Reply-chain validation
 - [ ] IP allowlisting for API keys
 - [ ] Usage anomaly detection
 
@@ -968,7 +984,10 @@ Account page, key rotation, credit refill links.
 SPF/DKIM/DMARC enforcement on inbound. Rate limiting. Error handling, logging.
 
 ### Phase 8: Cloudflare migration + Resend (Day 10)
-Inbound moved to Cloudflare Email Routing → Email Worker → webhook. Outbound moved to Resend. AWS fully removed. TOTP encryption implemented. See Part 7.
+Inbound moved to Cloudflare Email Routing → Email Worker → webhook. Outbound moved to Resend. AWS fully removed. TOTP encryption implemented (later replaced by Door Knock). See Part 7.
+
+### Phase 9: Door Knock nonce authentication (Day 20)
+Replaced TOTP with nonce-based reply-to authentication. Every outbound email gets a reply-to address with single-use nonce (`agent+nonce@sixel.email`). Human just replies — nonce validates automatically. Knock flow for unsolicited contact. All-stop kill switch (email + browser). CF Worker updated to extract nonce from `+` addressing. See Part 7.
 
 ---
 
@@ -987,18 +1006,27 @@ Every box must be checked before launch.
 - [ ] Footer links are clickable in Apple Mail (iOS)
 - [ ] Footer links are clickable in Outlook
 - [ ] Email `From` shows as `agent-name@sixel.mail`
+- [ ] Email Reply-To contains valid nonce address
 - [ ] Insufficient credits returns 402 with top-up URL
 - [ ] Missing/invalid auth token returns 401
 
 ### Inbound (human → agent)
-- [ ] Reply from allowed contact gets stored
+- [ ] Reply with valid nonce from allowed contact gets stored
 - [ ] `GET /v1/inbox` returns the reply
 - [ ] Reply from non-allowed address is silently dropped
 - [ ] Reply from spoofed address (failing SPF/DKIM) is rejected
-- [ ] Inbound deducts 1 credit
+- [ ] Reply with valid nonce deducts 1 credit
 - [ ] Inbound with 0 credits is dropped (human notified)
 - [ ] `GET /v1/inbox` marks messages as read
 - [ ] `GET /v1/inbox/:id` returns specific message
+- [ ] Reply with invalid/expired nonce is dropped
+- [ ] Reply with burned (reused) nonce is dropped
+- [ ] Knock (no nonce, allowed contact) triggers auto-reply with fresh nonce
+- [ ] Knock auto-reply does NOT deduct credit
+- [ ] Knock rate limiting: >10/min → dropped
+- [ ] All-stop via email deactivates channel
+- [ ] All-stop via browser deactivates channel
+- [ ] Deactivated channel drops all inbound
 
 ### Round-trip
 - [ ] Full cycle: curl send → email → human replies → curl poll → reply returned
@@ -1081,6 +1109,10 @@ Every box must be checked before launch.
 - [ ] Top-up link works
 - [ ] "Create another agent" works
 - [ ] Billing history shows all top-ups
+- [ ] Kill switch setup generates key and QR code
+- [ ] Kill switch badge shows when configured
+- [ ] Channel OFF badge shows when deactivated
+- [ ] Reactivate Channel button works
 - [ ] Requires authentication
 - [ ] User A cannot see User B's data
 
@@ -1107,21 +1139,22 @@ Every box must be checked before launch.
 - [ ] Allowed contact + DMARC PASS → accepted
 - [ ] Spoofed sender (DMARC FAIL) → rejected at SMTP by Cloudflare
 - [ ] Non-allowed address → rejected by Email Worker
-- [ ] TOTP-enabled agent: body encrypted before reaching our server
-- [ ] TOTP-enabled agent: message without TOTP code → forwarded plaintext (backwards compatible)
+- [ ] Nonce-validated message stored; no-nonce message triggers knock flow
+- [ ] All-stop via email deactivates channel correctly
 - [ ] Outbound SPF record valid
 - [x] Outbound DKIM signature valid (Resend, verified)
 - [ ] DMARC record published
 
-### TOTP encryption
-- [ ] TOTP secret generated client-side (never sent to server)
-- [ ] QR code renders correctly for standard authenticator apps
-- [ ] Worker extracts 6-digit code from first or last line
-- [ ] Worker encrypts body with extracted code
-- [ ] Worker strips TOTP line before encryption
-- [ ] Reference client decrypts with current TOTP window ± N
-- [ ] Reference client sends alert on failed decryption
-- [ ] Reference client does NOT include gibberish in alert
+### Door Knock nonce validation
+- [ ] Outbound emails include reply-to with single-use nonce
+- [ ] Worker extracts nonce from `+` addressing
+- [ ] Valid nonce → message stored, credit deducted
+- [ ] Invalid/expired nonce → message dropped
+- [ ] Burned nonce cannot be reused
+- [ ] Knock from allowed contact (no nonce) → auto-reply with fresh nonce
+- [ ] Knock rate limiting: 10/min per agent
+- [ ] All-stop nonce prefix deactivates channel
+- [ ] Channel kill switch works via email and browser
 
 ### Rate limits
 - [ ] >100 msgs/day → rate limited
@@ -1152,6 +1185,7 @@ Every box must be checked before launch.
 - [x] Catch-all routing rule: `*@sixel.email` → Worker
 - [x] support@sixel.email → eterryphd@gmail.com forwarding
 - [ ] DMARC enforcement confirmed (spoofed email rejected at SMTP) — needs red team verification
+- [x] Worker extracts nonce from `+` addressing (Door Knock)
 
 ### Resend (outbound)
 - [x] Domain verified (DKIM)
@@ -1207,12 +1241,17 @@ The final gate. Do this last.
 - [ ] **Sign up fresh.** GitHub → create agent → pay $5 → get API key.
 - [ ] **Configure a real agent** (Claude Code) with the config snippet.
 - [ ] **Let it get stuck.** Wait for the email.
-- [ ] **Reply from your phone.** Agent receives reply and continues.
+- [ ] **Reply from your phone.** (Reply-to has nonce.) Agent receives reply and continues.
+- [ ] **Send unsolicited email (knock).** Receive auto-reply with nonce in reply-to.
+- [ ] **Reply to knock reply.** Message stored, credit deducted.
 - [ ] **Kill the agent.** Wait 5 minutes. Receive "agent down" email.
 - [ ] **Click "Pause 1hr"** from the email. Verify confirmation page.
 - [ ] **Restart the agent.** Receive "agent is back" email.
+- [ ] **Set up kill switch.** /account → Setup Kill Switch. Save QR code.
+- [ ] **Test kill switch.** Send allstop email. Verify channel deactivated.
+- [ ] **Reactivate channel.** Via /account dashboard.
 - [ ] **Check account page.** Messages, credits, status all correct.
-- [ ] **Every email had:** correct footer, working links, accurate credit count.
+- [ ] **Every email had:** correct footer, working links, accurate credit count, reply-to nonce.
 
 If this works from your phone while away from your desk, ship it.
 
@@ -1238,262 +1277,196 @@ If this works from your phone while away from your desk, ship it.
 
 ---
 
-# Part 7: Cloudflare Inbound Architecture & TOTP Encryption
+# Part 7: Cloudflare Inbound Architecture & Door Knock Authentication
 
-*Migration completed 2026-02-10. AWS fully removed from the stack.*
+*Cloudflare migration completed 2026-02-10. AWS fully removed. Door Knock nonce authentication deployed 2026-02-20, replacing TOTP encryption.*
 
-## Why We Moved
+## Why We Moved (from SES)
 
 SES checked SPF/DKIM/DMARC but did not enforce — it delivered all email regardless of verdict. Both authentication (is the sender who they claim to be?) and authorization (is the sender allowed to talk to this agent?) were enforced solely in our Python webhook handler. One bug in that code and both checks failed.
 
 The migration pushed both checks below our application layer.
+
+## Why We Moved (from TOTP to Door Knock)
+
+TOTP encryption required the human to copy a 6-digit code from an authenticator app into every email reply. It was friction — and since the TOTP code was delivered through the same email channel (not a separate device), it wasn't a true second factor. The security benefit (server-side encryption) came at significant UX cost for a weak threat model improvement.
+
+Door Knock replaces TOTP with **nonce-based reply-to validation**: every outbound email includes a `Reply-To` address with a single-use nonce (`agent+nonce@sixel.email`). The human just hits reply. Zero friction, zero apps, zero codes.
 
 ## Current Inbound Architecture
 
 | Layer | Provider | Responsibility |
 |-------|----------|---------------|
 | 1. MX / SMTP | Cloudflare Email Routing | Receives email, enforces DMARC, rejects spoofed senders at SMTP level |
-| 2. Email Worker | Cloudflare (our JS code) | Checks sender against allowed contact. If TOTP-enabled: extracts TOTP code from body, encrypts body, strips code. Forwards to our webhook. |
-| 3. Webhook | Our server (Fly.io) | Stores message body (ciphertext or plaintext). Third line of defense, not first. |
-| 4. API | Our server (Fly.io) | Serves stored messages to agents. No change to interface. |
-| 5. Agent | Agent's local runtime | Reference client decrypts with TOTP, surfaces only verified messages. |
+| 2. Email Worker | Cloudflare (our JS code) | Checks sender against allowed contact. Extracts nonce from `+` addressing. Forwards to our webhook. |
+| 3. Webhook | Our server (Fly.io) | Validates nonce (authenticated message) or handles knock flow. Third line of defense. |
+| 4. API | Our server (Fly.io) | Serves stored messages to agents. Generates nonce on every outbound email. |
+| 5. Agent | Agent's local runtime | Sends via API, polls inbox. No client-side crypto needed. |
 
-## What Changed (from SES)
+## What Changed (TOTP → Door Knock, 2026-02-20)
 
-- **MX record**: now `route1/2/3.mx.cloudflare.net` (Cloudflare Email Routing) — completed 2026-02-10
-- **SPF TXT record**: updated to include Cloudflare
-- **SES receipt rule**: removed (SES no longer receives inbound)
-- **SNS topic**: removed
-- **AWS entirely removed**: no AWS credentials in the stack. Outbound migrated to Resend.
-- **Webhook handler**: simplified — no SNS signature verification, no SPF/DKIM/DMARC checking (Cloudflare handles both). Receives pre-processed payload from Email Worker.
-- **Cloudflare Email Worker**: JavaScript at Cloudflare edge. Checks allowed contact, handles TOTP encryption, forwards to our webhook. Deployed and live.
-- **TOTP setup on agent creation**: Browser generates secret client-side, never touches server. Implemented.
+- **TOTP encryption removed** from Cloudflare Email Worker. Worker no longer encrypts body.
+- **Worker extracts nonce** from `+` addressing in recipient (`agent+nonce@sixel.email` → nonce part forwarded in payload).
+- **Nonce table added** to database: single-use tokens with 30-minute TTL, atomic burn on validation.
+- **Webhook handler rewritten**: three paths — nonce validation (authenticated message), knock flow (no nonce → auto-reply with fresh nonce), all-stop (emergency channel shutdown).
+- **Every outbound email** now includes `Reply-To: agent+nonce@sixel.email` with a fresh single-use nonce.
+- **Knock rate limiting**: 10/min per agent (in-memory sliding window).
+- **Channel kill switch**: `channel_active` flag + pre-shared `allstop_key_hash` on agents table. All-stop via email (`agent+allstop-KEY@sixel.email`) or browser (`GET /allstop?agent=X&key=Y`).
+- **Account page**: kill switch setup (QR code generation), channel status badges, reactivate button.
+- **No TOTP secret needed** at signup or in agent config. No authenticator app. No reference client crypto.
+
+## What Changed (SES → Cloudflare, 2026-02-10)
+
+- **MX record**: now `route1/2/3.mx.cloudflare.net` (Cloudflare Email Routing)
+- **SES receipt rule, SNS topic, AWS credentials**: all removed
+- **Outbound**: migrated to Resend (built on SES infrastructure)
 
 ## What Didn't Change
 
 - Outbound email (Resend API, domain verified via DKIM)
-- API endpoints (same interface, body may be ciphertext)
-- Database schema (body column stores whatever the Worker forwarded)
+- API endpoints (same interface for agents)
 - Dashboard, payments, heartbeat
+- One-allowed-contact model
+- DMARC enforcement at SMTP
 
 ---
 
-## TOTP Encryption
+## Door Knock Nonce Authentication
 
-### The Problem
+### The Concept
 
-If our server is compromised, an attacker can read all messages and inject prompt injection content into agent inboxes. All current security checks are enforced in our code — they're only as strong as our code is correct.
+The agent authenticates the human, not the other way around. Every outbound email (from agent to human) contains a `Reply-To` address with a single-use nonce. The human replies → the nonce in the reply-to address proves the reply is in response to a real outbound message. No codes, no apps, no friction.
 
-### The Solution
+If the human wants to initiate contact (no prior outbound to reply to), they send an unsolicited email — a "knock." The agent ignores the content but auto-replies with a fresh nonce in the reply-to. The human replies to THAT. Three emails, zero configuration.
 
-TOTP-based encryption with the Cloudflare Email Worker as the encryption boundary.
+### Nonce Properties
 
-1. At agent setup, browser generates a TOTP shared secret **client-side** (JavaScript). Displays QR code for authenticator app. Displays raw secret for agent config. **Secret never touches our server.**
-2. Agent stores the TOTP shared secret locally (credential file, not in our database).
-3. To email the agent, human pastes the current 6-digit TOTP code at the top or bottom of their message body.
-4. Cloudflare Email Worker extracts the TOTP code, encrypts the body with it, strips the code, forwards only ciphertext to our server.
-5. Our server stores ciphertext — never sees plaintext.
-6. Agent's reference client generates recent TOTP codes from the shared secret, tries each to decrypt. One works → message is authentic and readable. None work → alert sent, message discarded.
+- **192 bits of entropy** (24 bytes, base64url encoded → 32 characters)
+- **Single-use**: atomically burned on first validation (database UPDATE with WHERE burned = FALSE)
+- **30-minute TTL**: expired nonces are ignored
+- **Per-agent**: each nonce is bound to the agent that generated it
+- **Embedded in reply-to**: `agent+nonce@sixel.email` — Cloudflare Email Routing delivers to the same mailbox regardless of `+` suffix
 
-### Key Distribution (setup, once)
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                    User's Browser (setup page)                    │
-│                                                                   │
-│   JavaScript generates TOTP shared secret client-side             │
-│   Secret NEVER leaves the browser via network                     │
-│                                                                   │
-│   ┌─────────────┐              ┌──────────────────┐              │
-│   │  QR Code     │              │  Raw Secret Text  │             │
-│   │  (on screen) │              │  (on screen)      │             │
-│   └──────┬──────┘              └────────┬─────────┘              │
-│          │                              │                         │
-└──────────┼──────────────────────────────┼─────────────────────────┘
-           │ eyes → camera                │ eyes → clipboard
-           ▼                              ▼
-┌────────────────────┐         ┌────────────────────────┐
-│  Authenticator App  │         │  Agent Config File      │
-│  (phone)            │         │  (local machine)        │
-│                     │         │                         │
-│  Generates 6-digit  │         │  Generates 6-digit      │
-│  TOTP codes every   │         │  TOTP codes to attempt  │
-│  30 seconds         │         │  decryption             │
-└────────────────────┘         └────────────────────────┘
-
-    HUMAN endpoint                  AGENT endpoint
-
-    The shared secret exists at these two endpoints and nowhere else.
-    Our server, database, and Cloudflare never possess the secret.
-```
-
-### Inbound Message Flow (per message)
+### Inbound Message Flow
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Human writes email                                      │
-│                                                          │
-│  "Here are the DB creds: postgres://...                  │
-│   847291"  ← TOTP code from authenticator app            │
-│                                                          │
-│  Sees: plaintext + TOTP code                             │
+│  Agent sends email to human                              │
+│  POST /v1/send → Resend                                  │
+│  Reply-To: agent+Kx9mQ2...Rz8w@sixel.email             │
+│            └── single-use nonce (32 chars) ──┘           │
 └──────────────────────┬──────────────────────────────────┘
                        │
           ┌────────────▼─────────────┐
-          │  Gmail / mail provider    │
-          │  Sees: plaintext + code   │
+          │  Human sees email         │
+          │  Hits "Reply"             │
+          │  Reply goes to agent+     │
+          │  Kx9mQ2...Rz8w@sixel.email│
           └────────────┬─────────────┘
                        │ SMTP
           ┌────────────▼─────────────┐
           │  Cloudflare Email Routing │
           │  DMARC enforcement        │
-          │  Sees: plaintext + code   │
           │  (rejects spoofed sender) │
           └────────────┬─────────────┘
                        │
           ┌────────────▼──────────────────────────────────┐
           │  Cloudflare Email Worker                       │
           │                                                │
-          │  1. KV lookup: agent exists? sender allowed?   │
-          │  2. Extract "847291" from body                  │
-          │  3. Derive AES-256 key:                        │
-          │     PBKDF2(code, salt=agent+date) → 256-bit    │
-          │  4. Encrypt body (minus code line):             │
-          │     AES-256-GCM → iv + ciphertext + auth tag   │
-          │  5. Base64 encode                               │
-          │                                                │
-          │  Sees: plaintext briefly in Worker memory       │
-          │  Forwards: base64(iv + ciphertext + tag)        │
+          │  1. Split recipient on '+':                    │
+          │     "agent+Kx9mQ2...Rz8w" → agent, nonce      │
+          │  2. KV lookup: agent exists? sender allowed?   │
+          │  3. Forward to webhook with nonce in payload   │
           └────────────┬──────────────────────────────────┘
                        │ HTTPS POST + shared secret
           ┌────────────▼──────────────────────────────────┐
           │  Our Server (Fly.io)                           │
           │                                                │
-          │  Stores in database:                           │
-          │    body = "nK7x2mQ9f4...Rz8wA=="              │
-          │    encrypted = true                            │
+          │  Nonce present → validate:                     │
+          │    • Not burned? Not expired? Matches agent?   │
+          │    • Yes → burn nonce, store message,          │
+          │           deduct 1 credit                      │
+          │    • No → drop silently                        │
           │                                                │
-          │  Sees: ciphertext only. Cannot decrypt.        │
-          └────────────┬──────────────────────────────────┘
-                       │ GET /v1/inbox
-          ┌────────────▼──────────────────────────────────┐
-          │  Agent Reference Client (local)                │
-          │                                                │
-          │  Has: TOTP shared secret from setup            │
-          │  1. Generate TOTP codes for current ± N windows│
-          │     (e.g. 847291, 193847, 502916)              │
-          │  2. For each code:                              │
-          │     PBKDF2(code, salt=agent+date) → key        │
-          │     Attempt AES-256-GCM decrypt                │
-          │  3. One succeeds → plaintext recovered          │
-          │     "Here are the DB creds: postgres://..."    │
-          │     None succeed → alert human, discard msg    │
-          │                                                │
-          │  Sees: plaintext (after successful decryption)  │
-          │  Decryption IS authentication.                  │
+          │  No nonce (from allowed contact) → KNOCK:      │
+          │    • Rate limit check (10/min)                 │
+          │    • Generate fresh nonce                      │
+          │    • Reply with nonce in Reply-To              │
+          │    • No credit deduction                       │
           └───────────────────────────────────────────────┘
 
 WHAT EACH PARTY SEES:
 
-  Human's mail provider:  plaintext + TOTP code
-  Cloudflare (SMTP):      plaintext + TOTP code (briefly, in memory)
-  Cloudflare Worker:      plaintext + TOTP code → ciphertext (briefly, in memory)
-  Our server:             ciphertext only ←── THIS IS THE POINT
-  Our database:           ciphertext only
-  Agent client:           ciphertext → plaintext (after local decryption)
+  Human:               plaintext (in and out)
+  Human's mail client: reply-to address with nonce (opaque to human)
+  Cloudflare (SMTP):   plaintext + nonce in address
+  Cloudflare Worker:   plaintext, extracts nonce from address
+  Our server:          plaintext + nonce → validates, stores
+  Agent:               plaintext via /v1/inbox
 
 ATTACK SCENARIOS:
 
-  Server compromised:     attacker reads ciphertext → useless
-  Database breached:      attacker reads ciphertext → useless
-  Prompt injection email: no valid TOTP → decryption fails → agent discards
-  TOTP code intercepted:  decrypts ONE message, expires in 30s, no forward access
-  Cloudflare compromised: same trust boundary as Gmail (sees plaintext already)
+  Spoofed sender:        DMARC fails → rejected at SMTP (Layer 1)
+  Wrong sender:          allowed-contact check fails → rejected (Layer 2)
+  No nonce:              treated as knock → auto-reply, content ignored
+  Stolen/guessed nonce:  192 bits entropy → infeasible. Also single-use.
+  Expired nonce:         30-minute TTL → dropped
+  Replay (burned nonce): atomic burn → second use dropped
+  Server compromised:    attacker reads plaintext messages (known, accepted)
 ```
 
-### Outbound Flow (asymmetric — plaintext)
+### Knock Flow (human initiates)
 
 ```
-┌───────────────────────────┐
-│  Agent sends via API       │
-│  POST /v1/send             │
-│  body = plaintext          │
-└─────────────┬─────────────┘
-              │
-┌─────────────▼─────────────┐
-│  Our Server                │
-│  Sees: plaintext           │  ← known weakness
-│  Sends via Resend API      │
-└─────────────┬─────────────┘
-              │
-┌─────────────▼─────────────┐
-│  Human's Inbox             │
-│  Sees: plaintext           │
-└───────────────────────────┘
+Human                           Server                      Human
+  │                               │                           │
+  │  1. Sends unsolicited email   │                           │
+  │  To: agent@sixel.email        │                           │
+  │──────────────────────────────►│                           │
+  │                               │  Content ignored.         │
+  │                               │  Generate nonce.          │
+  │                               │                           │
+  │  2. Auto-reply with nonce     │                           │
+  │  Reply-To: agent+NONCE@...    │                           │
+  │◄──────────────────────────────│                           │
+  │                               │                           │
+  │  3. Human replies to THAT     │                           │
+  │  To: agent+NONCE@sixel.email  │                           │
+  │──────────────────────────────►│                           │
+  │                               │  Valid nonce → store msg  │
+  │                               │  Deduct 1 credit          │
 
-  Outbound is NOT encrypted. Known, accepted asymmetry.
-  Server compromise → outbound messages readable.
-  Agent replies may leak context about encrypted inbound.
-  Future mitigation: static decrypt page at sixel.email/e
+Three emails. Zero friction. No codes. No apps.
+Knocks don't deduct credits — they're infrastructure.
 ```
 
-### What This Achieves
+### Channel Kill Switch (All-Stop)
 
-- **Our server compromised** → attacker sees ciphertext. Useless.
-- **Database breached** → ciphertext. Useless.
-- **Prompt injection via inbox** → injected message isn't encrypted with a valid TOTP code → agent's client fails to decrypt → discards. Injection impossible.
-- **TOTP code in email body** → expires in 30 seconds. Captured from logs, it decrypts one message but gives no forward access.
+Emergency channel deactivation via pre-shared key. Two paths:
 
-### Trust Boundaries
+**Via email:** Send to `agent+allstop-KEY@sixel.email`. Worker forwards, server validates SHA-256(KEY) against stored hash, sets `channel_active = FALSE`. All subsequent inbound dropped.
 
-- Cloudflare sees plaintext briefly in Worker memory (acceptable — same trust level as Gmail seeing plaintext now).
-- TOTP shared secret exists only at the endpoints: human's authenticator app + agent's local config. Never in our infrastructure.
-- TOTP secret generated client-side in user's browser at setup. Never touches our server. The one-time exchange is analog: eyes (read QR/secret) → camera (scan) → clipboard (copy to agent config).
-- **Decryption IS authentication.** No separate validation step needed.
+**Via browser:** Visit `https://sixel.email/allstop?agent=ADDR&key=KEY`. Same validation, same result. Bookmarkable.
 
-### Outbound: Plaintext Asymmetry
+**Setup:** `/account/setup-allstop` generates random key, stores SHA-256 hash server-side, shows:
+- QR code encoding `mailto:agent+allstop-KEY@sixel.email` (scan with phone, save as contact)
+- Raw address text with copy button
+- Browser kill switch URL (bookmarkable)
 
-Agent → human email remains **unencrypted plaintext**. There's no good UX for the human to decrypt agent emails with current tooling — you can't ask someone to punch a TOTP code into a decrypt page every time they get an email.
+**Reactivation:** Only via live text session or `/account` dashboard with authenticated session. Cannot be reactivated via email.
 
-This means:
-- If our server is compromised, outbound messages are readable
-- Agent replies may leak context about encrypted inbound content
-- This is a known, accepted asymmetry
+### What Door Knock Trades vs. TOTP
 
-**Future mitigation:** A static encrypt/decrypt page at `sixel.email/e` — human decrypts in-browser. Doesn't change the architecture, just adds a static HTML page. But it adds friction, so it's opt-in and later.
+| | TOTP | Door Knock |
+|---|---|---|
+| Human UX | Copy 6-digit code into every reply | Just hit reply |
+| Setup | Authenticator app + secret in agent config | Nothing (automatic) |
+| Server compromise | Server sees ciphertext only | Server sees plaintext |
+| Prompt injection | Decryption fails → agent discards | Must possess valid nonce (192-bit) |
+| True second factor? | No (code delivered same channel) | No (nonce delivered same channel) |
+| Kill switch | None | Email + browser |
 
-### TOTP Is Optional
-
-TOTP encryption is opt-in at agent setup. Agents without TOTP work exactly as before — plaintext in, plaintext stored, plaintext out. The one-allowed-contact check and DMARC enforcement still apply. TOTP is for users who want the additional guarantee that even a compromised server can't read or inject messages.
-
-### How TOTP Works (for reference)
-
-TOTP (RFC 6238): shared secret + current time ÷ 30 seconds → HMAC-SHA1 → truncate to 6 digits. Both sides run the same math independently. No server communication needed. Any standard authenticator app works (Google Authenticator, Authy, 1Password, Bitwarden, etc.). The QR code is a standard URL: `otpauth://totp/sixel.email:agent-name?secret=BASE32SECRET&issuer=sixel.email`
-
----
-
-## Agent Best Practices (Reference Client)
-
-**Core principle: the agent never reads raw email.** It reads through a local decryption client that gates all access.
-
-The reference implementation is a local client/library that:
-1. Pulls messages from `/v1/inbox`
-2. Attempts TOTP decryption on each message (current window ± N to account for delivery delay)
-3. Surfaces only successfully decrypted messages to the agent
-4. On failed decryption: sends an alert to the allowed contact ("I received a message I couldn't decrypt"). Does NOT include the undecryptable content in the alert (it could be crafted to inject via the alert text).
-5. If failures repeat, escalates the warning — possible tampering, not just clock drift.
-
-**Why this matters:** The agent literally cannot be prompt-injected through email because it never has access to unverified content. The client is the gatekeeper.
-
-**We can't enforce this** — users can bypass the client and call the API directly. But we ship the reference implementation, make it the easy/default path, and document why it matters.
-
-### Agent Setup Instructions
-
-The config snippet shown at agent creation includes:
-1. API endpoint + token (same as before)
-2. TOTP shared secret (if enabled)
-3. Reference client usage (or clear instructions to build the equivalent)
-4. **"Never call `/v1/inbox` directly from agent code. Use the decryption client."**
+The trade: TOTP encrypted at rest, Door Knock doesn't. But TOTP's encryption was theater in context — the code was delivered through the same email channel, so a compromised email account gives both the message and the code. Door Knock accepts this reality and optimizes for zero-friction UX while adding the kill switch TOTP lacked.
 
 ---
 
@@ -1502,31 +1475,13 @@ The config snippet shown at agent creation includes:
 ### Responsibilities
 
 1. **Receive email** from Cloudflare Email Routing
-2. **Check allowed contact**: look up agent by `To` address, verify `From` matches allowed contact. Reject if no match.
-3. **Check TOTP status**: does this agent have TOTP enabled?
-   - If no: forward plaintext body to our webhook
-   - If yes: extract TOTP code from body (first or last line matching `/^\d{6}$/`), encrypt body with the code as key, strip the code, forward ciphertext
-4. **Forward to webhook**: HTTPS POST to our server with auth header + processed payload
+2. **Extract nonce** from `+` addressing: `agent+nonce@sixel.email` → split on `+`, pass nonce in payload
+3. **Check allowed contact**: KV lookup by agent address, verify `From` matches. Reject if no match.
+4. **Forward to webhook**: HTTPS POST to our server with auth header + processed payload (agent_address, from, subject, body, nonce)
 
 ### Allowed-Contact Lookup
 
-The Worker needs to know which agents exist and who their allowed contacts are. Options:
-- **(a) Call our API** from the Worker — simplest but adds latency and creates a dependency on our server being up
-- **(b) Cloudflare KV** — replicate agent→contact mappings. Fast reads, eventual consistency. Needs sync mechanism.
-- **(c) Cloudflare D1** — SQLite at the edge. Second database to maintain.
-
-Decision: **(b) Cloudflare KV**. Our server pushes updates to KV on agent create/update. KV reads are fast (<1ms at edge). Eventual consistency is fine — agent creation isn't time-critical. Sync is a single API call on agent mutation.
-
-### TOTP Encryption in the Worker
-
-When the Worker detects a TOTP code in the email body:
-1. Extract the 6-digit code (regex: first or last non-empty line matching `^\d{6}$`)
-2. Derive an AES-256 key from the code using PBKDF2 (salt = agent address + message date)
-3. Encrypt the body (minus the TOTP line) with AES-256-GCM
-4. Forward: `{agent_address, from, subject, body: base64(iv + ciphertext + tag), encrypted: true}`
-
-When no TOTP code is found:
-- Forward plaintext: `{agent_address, from, subject, body: original_body, encrypted: false}`
+Decision: **Cloudflare KV**. Our server pushes updates to KV on agent create/update. KV reads are fast (<1ms at edge). Eventual consistency is fine — agent creation isn't time-critical. Sync is a single API call on agent mutation.
 
 ### DNS (current)
 
@@ -1538,16 +1493,13 @@ A/AAAA @ → Fly.io
 DKIM records → Resend (verified)
 ```
 
-SES MX record, SNS topic, SES receipt rule — all removed.
-
 ---
 
 ## Upgrade Path: True E2E Encryption
 
 If we later build a static page at `sixel.email/e`:
 - Human encrypts in-browser before sending → pastes ciphertext into email body
-- Cloudflare Worker sees only ciphertext → passes through (can't decrypt, doesn't try)
-- Our server stores ciphertext
 - Agent decrypts locally
+- Our server stores ciphertext, cannot read
 
-True E2E with no infrastructure changes. The page is static HTML + JavaScript, no server interaction, works offline. The Worker's TOTP extraction logic simply doesn't find a code (the whole body is ciphertext) and forwards as-is.
+This would restore the at-rest encryption benefit TOTP provided, without the per-message friction of TOTP codes. Deferred to post-MVP.
