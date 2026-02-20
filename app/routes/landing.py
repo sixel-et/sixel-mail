@@ -66,7 +66,7 @@ If it stops responding, you get an email. The whole UI is your inbox.</p>
 
 <h2>The agent integration</h2>
 <pre>You have an email address for contacting me when you're stuck.
-API: https://api.sixel.email/v1
+API: https://sixel.email/v1
 Token: sm_live_xxxxx
 Use POST /v1/send to email me. Use GET /v1/inbox to check for my reply.
 Poll /v1/inbox every 60 seconds while waiting.</pre>
