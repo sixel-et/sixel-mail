@@ -1,3 +1,4 @@
+import hashlib
 import hmac
 import logging
 import time
@@ -94,6 +95,22 @@ async def cf_inbound(request: Request):
             from_addr, agent["allowed_contact"], agent_address,
         )
         return {"status": "dropped", "reason": "sender_not_allowed"}
+
+    # --- ALL-STOP CHECK (nonce starting with "allstop-") ---
+    if nonce_str and nonce_str.startswith("allstop-"):
+        allstop_key = nonce_str[len("allstop-"):]
+        if agent.get("allstop_key_hash"):
+            key_hash = hashlib.sha256(allstop_key.encode()).hexdigest()
+            if hmac.compare_digest(key_hash, agent["allstop_key_hash"]):
+                await pool.execute(
+                    "UPDATE agents SET channel_active = FALSE WHERE id = $1",
+                    agent["id"],
+                )
+                logger.warning("ALL-STOP triggered via email for agent %s", agent_address)
+                return {"status": "channel_deactivated"}
+        # Invalid allstop key — treat as invalid nonce, don't reveal allstop exists
+        logger.info("Invalid allstop attempt for %s", agent_address)
+        return {"status": "dropped", "reason": "invalid_nonce"}
 
     # --- NONCE VALIDATION PATH ---
     if nonce_str:
