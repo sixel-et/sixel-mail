@@ -125,6 +125,34 @@ Two mitigations:</p>
     already arrived while you were down. Handle it before doing anything else.</li>
 </ol>
 
+<h2>Attachments</h2>
+
+<h3>Sending attachments</h3>
+
+<p>Include an <code>attachments</code> array in your <code>POST /v1/send</code> request.
+Each attachment is a JSON object with <code>filename</code> and <code>content</code> (base64-encoded).</p>
+
+<pre>{
+  "subject": "Analysis results",
+  "body": "Here are the results.",
+  "attachments": [
+    {"filename": "results.csv", "content": "aWQsbmFtZSxzY29yZQ=="}
+  ]
+}</pre>
+
+<p>Limits: 10MB total decoded size, max 10 files per message.</p>
+
+<h3>Receiving attachments</h3>
+
+<p><code>GET /v1/inbox</code> includes attachment metadata on each message:</p>
+
+<pre>"attachments": [
+  {"id": "uuid", "filename": "photo.jpg", "mime_type": "image/jpeg", "size_bytes": 164883}
+]</pre>
+
+<p>Download the content with <code>GET /v1/inbox/{message_id}/attachments/{attachment_id}</code>.
+Returns raw bytes with the correct <code>Content-Type</code> header.</p>
+
 <h2>Multi-session coordination</h2>
 
 <p>If you run multiple agent sessions (different projects, different specializations),
@@ -165,6 +193,10 @@ send your agent a malicious email?</p>
 
 <h3>Door Knock nonce authentication</h3>
 
+<p>Door Knock is <strong>opt-in</strong> &mdash; toggle it during signup or on your
+<code>/account</code> page. Without it, emails from your allowed contact are accepted
+directly. With it enabled:</p>
+
 <p>Every outbound email from your agent includes a <code>Reply-To</code> address with a
 single-use nonce: <code>agent+nonce@sixel.email</code>. When you hit reply, the nonce
 validates your response automatically. No codes, no apps, no extra steps.</p>
@@ -173,6 +205,11 @@ validates your response automatically. No codes, no apps, no extra steps.</p>
 just send to <code>agent@sixel.email</code>. The agent ignores the content but
 auto-replies with a fresh nonce in the Reply-To. Reply to <em>that</em>, and your
 message goes through. Three emails, zero friction.</p>
+
+<div class="warn">
+<strong>Nonces expire after 30 minutes.</strong> If you don't reply within that window,
+the nonce is no longer valid. Send a new knock to get a fresh one.
+</div>
 
 <p>This means an attacker with a compromised email account can send a knock, but
 the auto-reply goes to <em>your</em> inbox &mdash; they'd need to also compromise
@@ -213,6 +250,18 @@ it's out of credits when it has something important to say.</p>
 Don't send five messages in a row. Don't poll for 10 seconds and then send a
 follow-up asking if you got the first one.</p>
 
+<h3>Reading email bodies without checking for binary</h3>
+<p>If your human pastes an image into an email, the body field can contain 200KB+
+of base64-encoded image data. An agent that reads or greps this content without
+checking can enter a hot loop &mdash; regex engines hit catastrophic backtracking
+on binary data, and the session becomes unrecoverable.</p>
+
+<div class="warn">
+<strong>Rule: read a small slice first.</strong> Before processing any email body,
+check the first few lines. If it looks like base64 or binary data, stop. Use the
+attachments endpoint to get file content separately.
+</div>
+
 <h2>FAQ</h2>
 
 <h3>Can the agent email anyone?</h3>
@@ -231,8 +280,20 @@ you'll get a recovery notification.</p>
 API key and coordinate responses (see Multi-session coordination above).</p>
 
 <h3>Is polling really free?</h3>
-<p>Yes. <code>GET /v1/inbox</code> is free. You only pay $0.01 per message sent or
-received. Polling once per minute for a month is zero cost.</p>
+<p>Yes. <code>GET /v1/inbox</code> is free. You only pay credits per message sent or
+received. Every account starts with 10,000 free credits. Polling once per minute
+for a month is zero cost.</p>
+
+<h3>Can agents send and receive attachments?</h3>
+<p>Yes. Up to 10 files per message, 10MB total. Send with base64-encoded content
+in the <code>attachments</code> array. Receive metadata in the inbox response,
+download via the attachment endpoint. See Attachments section above.</p>
+
+<h3>Do I need Door Knock nonces?</h3>
+<p>It's optional. Without it, any email from your allowed contact goes through
+directly. With it, replies are validated by a single-use nonce in the Reply-To
+address. Toggle it on <code>/account</code>. If you're not worried about email
+account compromise, you probably don't need it.</p>
 
 <h3>What if I email the agent from the wrong address?</h3>
 <p>Rejected at the edge. No credit deduction, no storage, no notification to
