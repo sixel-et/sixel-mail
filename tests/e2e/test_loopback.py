@@ -296,6 +296,44 @@ class TestBinarySafety:
         assert msg is not None, "Large message not in inbox"
 
 
+class TestWebhookAuth:
+    """Webhook authentication: X-Worker-Auth header validation."""
+
+    def test_missing_auth_header(self):
+        """No auth header → 403."""
+        import httpx
+        resp = httpx.post(
+            f"{E2E_BASE_URL}/webhooks/inbound",
+            json={"agent_address": "test-a", "from": "test-b@sixel.email",
+                  "subject": "No auth", "body": "test"},
+            timeout=10,
+        )
+        assert resp.status_code == 403
+
+    def test_wrong_auth_header(self):
+        """Wrong auth header → 403."""
+        import httpx
+        resp = httpx.post(
+            f"{E2E_BASE_URL}/webhooks/inbound",
+            json={"agent_address": "test-a", "from": "test-b@sixel.email",
+                  "subject": "Bad auth", "body": "test"},
+            headers={"X-Worker-Auth": "completely-wrong-secret"},
+            timeout=10,
+        )
+        assert resp.status_code == 403
+
+    def test_missing_required_fields(self):
+        """Missing agent_address/from → 400."""
+        import httpx
+        resp = httpx.post(
+            f"{E2E_BASE_URL}/webhooks/inbound",
+            json={"subject": "No agent", "body": "test"},
+            headers={"X-Worker-Auth": WORKER_SECRET},
+            timeout=10,
+        )
+        assert resp.status_code == 400
+
+
 class TestAllstop:
     """Allstop kill switch tests.
     These use the /allstop endpoint directly, not email injection."""
