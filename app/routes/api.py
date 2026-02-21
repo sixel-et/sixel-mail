@@ -161,11 +161,14 @@ async def send_message(req: SendRequest, agent_id: str = Depends(get_agent_id)):
     pool = await get_pool()
 
     agent = await pool.fetchrow(
-        "SELECT address, allowed_contact, credit_balance, nonce_enabled FROM agents WHERE id = $1",
+        "SELECT address, allowed_contact, credit_balance, nonce_enabled, admin_approved FROM agents WHERE id = $1",
         agent_id,
     )
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+
+    if not agent["admin_approved"]:
+        raise HTTPException(status_code=403, detail="Account pending admin approval")
 
     # Validate attachments before deducting credit
     validated_attachments = []

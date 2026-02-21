@@ -107,7 +107,7 @@ async def cf_inbound(request: Request):
     pool = await get_pool()
 
     agent = await pool.fetchrow(
-        "SELECT id, address, allowed_contact, credit_balance, channel_active, nonce_enabled "
+        "SELECT id, address, allowed_contact, credit_balance, channel_active, nonce_enabled, admin_approved "
         "FROM agents WHERE address = $1",
         agent_address,
     )
@@ -116,6 +116,11 @@ async def cf_inbound(request: Request):
         return {"status": "dropped", "reason": "unknown_agent"}
 
     agent_id = str(agent["id"])
+
+    # Check admin approval (user cannot override this)
+    if not agent["admin_approved"]:
+        logger.info("Inbound dropped for %s (not admin approved)", agent_address)
+        return {"status": "dropped", "reason": "not_approved"}
 
     # Check channel kill switch
     if not agent["channel_active"]:

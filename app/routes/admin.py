@@ -88,7 +88,7 @@ async def admin_dashboard(request: Request):
     # All agents with user info
     agents = await pool.fetch("""
         SELECT a.id, a.address, a.allowed_contact, a.credit_balance, a.last_seen_at,
-               a.agent_down_notified, a.nonce_enabled, a.created_at,
+               a.agent_down_notified, a.nonce_enabled, a.admin_approved, a.created_at,
                u.github_username, u.email as user_email,
                (SELECT COUNT(*) FROM messages m WHERE m.agent_id = a.id) as msg_count,
                (SELECT COUNT(*) FROM messages m WHERE m.agent_id = a.id AND m.direction = 'inbound' AND m.is_read = FALSE) as unread_count
@@ -121,6 +121,7 @@ async def admin_dashboard(request: Request):
 
         nonce = "yes" if a["nonce_enabled"] else "no"
         channel = "on" if a.get("channel_active", True) else '<span style="color:#dc3545">OFF</span>'
+        approved = '<span style="color:#28a745">yes</span>' if a.get("admin_approved", False) else '<span style="color:#dc3545;font-weight:bold">PENDING</span>'
         agent_rows += f"""
         <tr>
             <td><input type="checkbox" name="agent_ids" value="{a['id']}" class="agent-check"></td>
@@ -131,6 +132,7 @@ async def admin_dashboard(request: Request):
             <td>{a['msg_count']} ({a['unread_count']} unread)</td>
             <td>{nonce}</td>
             <td>{channel}</td>
+            <td>{approved}</td>
         </tr>"""
 
     flash = ""
@@ -160,6 +162,8 @@ async def admin_dashboard(request: Request):
     <label><input type="checkbox" id="select-all" onchange="document.querySelectorAll('.agent-check').forEach(c=>c.checked=this.checked)"> Select all</label>
     <select name="action" style="font-family:monospace;font-size:14px;padding:6px;">
         <option value="">— Bulk action —</option>
+        <option value="approve">Approve</option>
+        <option value="unapprove">Revoke approval</option>
         <option value="enable_channel">Enable channel</option>
         <option value="disable_channel">Disable channel</option>
         <option value="enable_nonce">Enable Door Knock</option>
@@ -169,7 +173,7 @@ async def admin_dashboard(request: Request):
     <button type="submit" onclick="if(this.form.action.value==='delete')return confirm('Delete selected agents? Cannot be undone.')">Apply</button>
 </div>
 <table>
-    <tr><th style="width:30px;"></th><th>Address</th><th>Owner</th><th>Credits</th><th>Last seen</th><th>Messages</th><th>Nonce</th><th>Channel</th></tr>
+    <tr><th style="width:30px;"></th><th>Address</th><th>Owner</th><th>Credits</th><th>Last seen</th><th>Messages</th><th>Nonce</th><th>Channel</th><th>Approved</th></tr>
     {agent_rows}
 </table>
 </form>
@@ -264,6 +268,9 @@ async def admin_agent_detail(agent_id: str, request: Request):
     channel_active = agent.get("channel_active", True)
     channel_str = "active" if channel_active else "DISABLED"
     channel_color = "#28a745" if channel_active else "#dc3545"
+    admin_approved = agent.get("admin_approved", False)
+    approved_str = "approved" if admin_approved else "PENDING"
+    approved_color = "#28a745" if admin_approved else "#dc3545"
     created_str = agent["created_at"].strftime("%Y-%m-%d %H:%M")
 
     flash = ""
@@ -273,6 +280,8 @@ async def admin_agent_detail(agent_id: str, request: Request):
         flash = f'<div class="flash">Door Knock {"enabled" if nonce_enabled else "disabled"}.</div>'
     elif request.query_params.get("channel_toggled"):
         flash = f'<div class="flash">Channel {"enabled" if channel_active else "disabled"}.</div>'
+    elif request.query_params.get("approval_toggled"):
+        flash = f'<div class="flash">Admin approval {"granted" if admin_approved else "revoked"}.</div>'
 
     return f"""<!DOCTYPE html>
 <html><head><title>Admin — {addr}@sixel.email</title>{STYLE}</head>
@@ -288,12 +297,18 @@ async def admin_agent_detail(agent_id: str, request: Request):
     <tr><td><strong>Last seen</strong></td><td>{last_seen_str}</td></tr>
     <tr><td><strong>Door Knock</strong></td><td>{nonce_str}</td></tr>
     <tr><td><strong>Channel</strong></td><td><span style="color:{channel_color}">{channel_str}</span></td></tr>
+    <tr><td><strong>Admin approved</strong></td><td><span style="color:{approved_color};font-weight:bold">{approved_str}</span></td></tr>
     <tr><td><strong>API key</strong></td><td>{key_info}</td></tr>
     <tr><td><strong>Created</strong></td><td>{created_str}</td></tr>
 </table>
 
 <h3>Actions</h3>
 <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+    <form method="POST" action="/admin/agent/{agent_id}/toggle-approval" style="margin:0;">
+        <button type="submit" class="{'danger' if admin_approved else ''}" style="{'background:#28a745' if not admin_approved else ''}">
+            {'Revoke approval' if admin_approved else 'Approve'}
+        </button>
+    </form>
     <form method="POST" action="/admin/agent/{agent_id}/toggle-nonce" style="margin:0;">
         <button type="submit">{'Disable' if nonce_enabled else 'Enable'} Door Knock</button>
     </form>
@@ -376,7 +391,21 @@ async def admin_bulk_action(request: Request):
 
     pool = await get_pool()
 
-    if action == "enable_channel":
+    if action == "approve":
+        for aid in agent_ids:
+            agent = await pool.fetchrow("SELECT address, allowed_contact, nonce_enabled FROM agents WHERE id = $1", aid)
+            if agent:
+                await pool.execute("UPDATE agents SET admin_approved = TRUE WHERE id = $1", aid)
+                await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], agent["nonce_enabled"], admin_approved=True)
+        logger.info("Admin bulk approved %d agents", len(agent_ids))
+    elif action == "unapprove":
+        for aid in agent_ids:
+            agent = await pool.fetchrow("SELECT address, allowed_contact, nonce_enabled FROM agents WHERE id = $1", aid)
+            if agent:
+                await pool.execute("UPDATE agents SET admin_approved = FALSE WHERE id = $1", aid)
+                await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], agent["nonce_enabled"], admin_approved=False)
+        logger.info("Admin bulk unapproved %d agents", len(agent_ids))
+    elif action == "enable_channel":
         for aid in agent_ids:
             await pool.execute("UPDATE agents SET channel_active = TRUE WHERE id = $1", aid)
         logger.info("Admin bulk enabled channel for %d agents", len(agent_ids))
@@ -386,17 +415,17 @@ async def admin_bulk_action(request: Request):
         logger.info("Admin bulk disabled channel for %d agents", len(agent_ids))
     elif action == "enable_nonce":
         for aid in agent_ids:
-            agent = await pool.fetchrow("SELECT address, allowed_contact FROM agents WHERE id = $1", aid)
+            agent = await pool.fetchrow("SELECT address, allowed_contact, admin_approved FROM agents WHERE id = $1", aid)
             if agent:
                 await pool.execute("UPDATE agents SET nonce_enabled = TRUE WHERE id = $1", aid)
-                await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], True)
+                await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], True, admin_approved=agent["admin_approved"])
         logger.info("Admin bulk enabled nonce for %d agents", len(agent_ids))
     elif action == "disable_nonce":
         for aid in agent_ids:
-            agent = await pool.fetchrow("SELECT address, allowed_contact FROM agents WHERE id = $1", aid)
+            agent = await pool.fetchrow("SELECT address, allowed_contact, admin_approved FROM agents WHERE id = $1", aid)
             if agent:
                 await pool.execute("UPDATE agents SET nonce_enabled = FALSE WHERE id = $1", aid)
-                await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], False)
+                await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], False, admin_approved=agent["admin_approved"])
         logger.info("Admin bulk disabled nonce for %d agents", len(agent_ids))
     elif action == "delete":
         for aid in agent_ids:
@@ -416,13 +445,33 @@ async def admin_bulk_action(request: Request):
     return RedirectResponse(f"/admin/?{param}=1", status_code=303)
 
 
+@router.post("/agent/{agent_id}/toggle-approval")
+async def admin_toggle_approval(agent_id: str, request: Request):
+    await _require_admin(request)
+    pool = await get_pool()
+
+    agent = await pool.fetchrow(
+        "SELECT id, address, allowed_contact, nonce_enabled, admin_approved FROM agents WHERE id = $1",
+        agent_id,
+    )
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    new_value = not agent["admin_approved"]
+    await pool.execute("UPDATE agents SET admin_approved = $1 WHERE id = $2", new_value, agent["id"])
+    await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], agent["nonce_enabled"], admin_approved=new_value)
+    logger.info("Admin toggled approval for %s: %s", agent["address"], new_value)
+
+    return RedirectResponse(f"/admin/agent/{agent_id}?approval_toggled=1", status_code=303)
+
+
 @router.post("/agent/{agent_id}/toggle-nonce")
 async def admin_toggle_nonce(agent_id: str, request: Request):
     await _require_admin(request)
     pool = await get_pool()
 
     agent = await pool.fetchrow(
-        "SELECT id, address, allowed_contact, nonce_enabled FROM agents WHERE id = $1",
+        "SELECT id, address, allowed_contact, nonce_enabled, admin_approved FROM agents WHERE id = $1",
         agent_id,
     )
     if not agent:
@@ -430,7 +479,7 @@ async def admin_toggle_nonce(agent_id: str, request: Request):
 
     new_value = not agent["nonce_enabled"]
     await pool.execute("UPDATE agents SET nonce_enabled = $1 WHERE id = $2", new_value, agent["id"])
-    await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], new_value)
+    await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], new_value, admin_approved=agent["admin_approved"])
     logger.info("Admin toggled nonce for %s: %s", agent["address"], new_value)
 
     return RedirectResponse(f"/admin/agent/{agent_id}?nonce_toggled=1", status_code=303)

@@ -38,6 +38,13 @@ export default {
         return;
       }
 
+      // Check admin approval
+      if (agentData.admin_approved === false) {
+        console.log(`Agent ${agentAddress} not admin approved`);
+        message.setReject("Recipient not available");
+        return;
+      }
+
       // Check allowed contact
       const senderEmail = extractEmail(from).toLowerCase();
       if (senderEmail !== agentData.allowed_contact) {

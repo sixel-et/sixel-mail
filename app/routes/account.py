@@ -41,8 +41,10 @@ async def account_page(request: Request):
         nonce_badge = ' <span style="background:#28a745;color:#fff;padding:2px 6px;font-size:12px;">DOOR KNOCK</span>' if nonce_enabled else ""
         has_allstop = bool(agent.get("allstop_key_hash"))
         channel_active = agent.get("channel_active", True)
+        admin_approved = agent.get("admin_approved", False)
         allstop_badge = ' <span style="background:#dc3545;color:#fff;padding:2px 6px;font-size:12px;">CHANNEL OFF</span>' if not channel_active else ""
         killswitch_badge = ' <span style="background:#6c757d;color:#fff;padding:2px 6px;font-size:12px;">KILL SWITCH</span>' if has_allstop else ""
+        pending_badge = ' <span style="background:#ffc107;color:#000;padding:2px 6px;font-size:12px;">PENDING APPROVAL</span>' if not admin_approved else ""
 
         # Get API key prefix
         key_row = await pool.fetchrow(
@@ -113,7 +115,7 @@ async def account_page(request: Request):
 
         agent_sections += f"""
 <div style="border: 1px solid #ccc; padding: 16px; margin: 16px 0;">
-    <h3>{address}@sixel.email{nonce_badge}{killswitch_badge}{allstop_badge}</h3>
+    <h3>{address}@sixel.email{nonce_badge}{killswitch_badge}{allstop_badge}{pending_badge}</h3>
     <p>Status: {status} (last seen: {last_seen_str})</p>
     <p>Allowed contact: {esc(agent['allowed_contact'])}</p>
     <p>Credits: {agent['credit_balance']} messages</p>
@@ -209,7 +211,7 @@ async def enable_nonce(request: Request):
     await pool.execute(
         "UPDATE agents SET nonce_enabled = true WHERE id = $1", agent["id"]
     )
-    await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], True)
+    await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], True, admin_approved=agent.get("admin_approved", False))
 
     return RedirectResponse("/account", status_code=303)
 
@@ -221,7 +223,7 @@ async def disable_nonce(request: Request):
     await pool.execute(
         "UPDATE agents SET nonce_enabled = false WHERE id = $1", agent["id"]
     )
-    await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], False)
+    await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], False, admin_approved=agent.get("admin_approved", False))
 
     return RedirectResponse("/account", status_code=303)
 

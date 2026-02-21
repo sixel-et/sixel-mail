@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _sync_agent_to_kv(address: str, allowed_contact: str, nonce_enabled: bool):
+async def _sync_agent_to_kv(address: str, allowed_contact: str, nonce_enabled: bool, admin_approved: bool = True):
     """Push agent→contact mapping to Cloudflare KV for the Email Worker.
 
     The Worker uses this to check allowed contacts at the edge.
@@ -29,6 +29,7 @@ async def _sync_agent_to_kv(address: str, allowed_contact: str, nonce_enabled: b
     value = json.dumps({
         "allowed_contact": allowed_contact.lower(),
         "nonce_enabled": nonce_enabled,
+        "admin_approved": admin_approved,
     })
 
     try:
@@ -299,7 +300,8 @@ async def create_agent(request: Request):
     )
 
     # Sync agent→contact mapping to Cloudflare KV (for Email Worker)
-    await _sync_agent_to_kv(address, allowed_contact, nonce_enabled)
+    # New agents are not admin-approved — blocked at edge until admin approves
+    await _sync_agent_to_kv(address, allowed_contact, nonce_enabled, admin_approved=False)
 
     # Generate API key
     key, key_hash, key_prefix = generate_api_key()
