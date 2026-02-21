@@ -62,7 +62,7 @@ The entire integration. Paste this into a system prompt, a `.claude` config, or 
 
 ```
 You have an email address for contacting me when you're stuck.
-API: https://api.sixel.mail/v1
+API: https://sixel.email/v1
 Token: sm_live_xxxxx
 Use POST /v1/send to email me. Use GET /v1/inbox to check for my reply.
 Poll /v1/inbox every 60 seconds while waiting.
@@ -73,7 +73,7 @@ No SDK. No package install. No config file. Any agent that can make an HTTP requ
 ### Send
 
 ```bash
-curl -X POST https://api.sixel.mail/v1/send \
+curl -X POST https://sixel.email/v1/send \
   -H "Authorization: Bearer sm_live_xxxxx" \
   -H "Content-Type: application/json" \
   -d '{
@@ -103,7 +103,7 @@ You don't specify a recipient. There's only one. It's already configured.
 ### Poll (and Heartbeat)
 
 ```bash
-curl https://api.sixel.mail/v1/inbox \
+curl https://sixel.email/v1/inbox \
   -H "Authorization: Bearer sm_live_xxxxx"
 ```
 
@@ -182,10 +182,10 @@ database. Can you paste them in your reply?
 Agent alive (last seen: just now)
 Credits: 412 messages remaining
 
-Turn alerts ON: https://api.sixel.mail/alert?a=on&agent=xxx&sig=yyy
-Pause 1hr: https://api.sixel.mail/alert?a=pause1h&agent=xxx&sig=yyy
-Pause 8hr: https://api.sixel.mail/alert?a=pause8h&agent=xxx&sig=yyy
-Mute until tomorrow: https://api.sixel.mail/alert?a=mute&agent=xxx&sig=yyy
+Turn alerts ON: https://sixel.email/alert?a=on&agent=xxx&sig=yyy
+Pause 1hr: https://sixel.email/alert?a=pause1h&agent=xxx&sig=yyy
+Pause 8hr: https://sixel.email/alert?a=pause8h&agent=xxx&sig=yyy
+Mute until tomorrow: https://sixel.email/alert?a=mute&agent=xxx&sig=yyy
 
 Add $5 credit: https://sixel.mail/topup?agent=xxx&amount=5&sig=yyy
 ```
@@ -202,10 +202,10 @@ Your agent my-agent@sixel.mail hasn't checked in since
 Agent OFFLINE (last seen: 2:34pm EST)
 Credits: 412 messages remaining
 
-Turn alerts ON: https://api.sixel.mail/alert?a=on&agent=xxx&sig=yyy
-Pause 1hr: https://api.sixel.mail/alert?a=pause1h&agent=xxx&sig=yyy
-Pause 8hr: https://api.sixel.mail/alert?a=pause8h&agent=xxx&sig=yyy
-Mute until tomorrow: https://api.sixel.mail/alert?a=mute&agent=xxx&sig=yyy
+Turn alerts ON: https://sixel.email/alert?a=on&agent=xxx&sig=yyy
+Pause 1hr: https://sixel.email/alert?a=pause1h&agent=xxx&sig=yyy
+Pause 8hr: https://sixel.email/alert?a=pause8h&agent=xxx&sig=yyy
+Mute until tomorrow: https://sixel.email/alert?a=mute&agent=xxx&sig=yyy
 
 Add $5 credit: https://sixel.mail/topup?agent=xxx&amount=5&sig=yyy
 ```
@@ -222,10 +222,10 @@ It was offline for 23 minutes.
 Agent alive (last seen: just now)
 Credits: 410 messages remaining
 
-Turn alerts ON: https://api.sixel.mail/alert?a=on&agent=xxx&sig=yyy
-Pause 1hr: https://api.sixel.mail/alert?a=pause1h&agent=xxx&sig=yyy
-Pause 8hr: https://api.sixel.mail/alert?a=pause8h&agent=xxx&sig=yyy
-Mute until tomorrow: https://api.sixel.mail/alert?a=mute&agent=xxx&sig=yyy
+Turn alerts ON: https://sixel.email/alert?a=on&agent=xxx&sig=yyy
+Pause 1hr: https://sixel.email/alert?a=pause1h&agent=xxx&sig=yyy
+Pause 8hr: https://sixel.email/alert?a=pause8h&agent=xxx&sig=yyy
+Mute until tomorrow: https://sixel.email/alert?a=mute&agent=xxx&sig=yyy
 
 Add $5 credit: https://sixel.mail/topup?agent=xxx&amount=5&sig=yyy
 ```
@@ -244,10 +244,10 @@ Add $10 credit: https://sixel.mail/topup?agent=xxx&amount=10&sig=yyy
 Agent alive (last seen: just now)
 Credits: 47 messages remaining
 
-Turn alerts ON: https://api.sixel.mail/alert?a=on&agent=xxx&sig=yyy
-Pause 1hr: https://api.sixel.mail/alert?a=pause1h&agent=xxx&sig=yyy
-Pause 8hr: https://api.sixel.mail/alert?a=pause8h&agent=xxx&sig=yyy
-Mute until tomorrow: https://api.sixel.mail/alert?a=mute&agent=xxx&sig=yyy
+Turn alerts ON: https://sixel.email/alert?a=on&agent=xxx&sig=yyy
+Pause 1hr: https://sixel.email/alert?a=pause1h&agent=xxx&sig=yyy
+Pause 8hr: https://sixel.email/alert?a=pause8h&agent=xxx&sig=yyy
+Mute until tomorrow: https://sixel.email/alert?a=mute&agent=xxx&sig=yyy
 ```
 
 ### Footer Rules
@@ -658,7 +658,7 @@ def sign_alert_url(agent_id: str, action: str) -> str:
         "agent": agent_id, "action": action,
         "expires": expires, "sig": signature,
     })
-    return f"https://api.sixel.mail/alert?{params}"
+    return f"https://sixel.email/alert?{params}"
 ```
 
 ---

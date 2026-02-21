@@ -4,27 +4,31 @@ Operational briefing. For the thinking record, see `Sixel's Notebook.md`.
 
 ---
 
-## Current State (2026-02-20)
+## Current State (2026-02-21)
 
 **Live at https://sixel.email**
 
 Working:
 - Full signup flow (GitHub OAuth → agent creation → API key)
+- **Free service**: 10,000 credits on signup, no payment required
+- **Legal disclaimer**: required acknowledgment during signup (experimental, PGP recommended, no warranty)
 - Dashboard with key rotation at /account
 - API (send/inbox/rotate-key), heartbeat monitoring, rate limiting
 - Admin panel at /admin/ (stats, agent management, credit grants — Eric-only)
 - Email sending via Resend (built on SES, DKIM verified)
 - Email receiving via Cloudflare Email Routing → Worker → webhook
-- **Door Knock nonce authentication** (replaced TOTP 2026-02-20):
-  - Every outbound email has reply-to `agent+nonce@sixel.email`
-  - Human replies → nonce validates automatically (single-use)
+- **Door Knock nonce authentication** (opt-in toggle, replaced TOTP):
+  - Toggle in signup and /account page (default: off)
+  - When enabled: every outbound email has reply-to `agent+nonce@sixel.email`
+  - When disabled: direct email relay, no nonce required
   - Knock flow: send to `agent@sixel.email` → auto-reply with nonce → reply to that
-  - Allstop kill switch: email + browser + QR code in /account
+  - Allstop kill switch: always works regardless of nonce setting (email + browser + QR)
+- Donate page at /donate (placeholder, no payment mechanism yet)
 - Auto-migration on app startup
+- All TOTP code removed (server-side and Worker)
 
 Known issues:
-- **Missing email (2026-02-20)**: Eric's reply after our 07:58 UTC outbound never reached the Worker. Cloudflare Email Routing may have delivery delays. Needs investigation.
-- Dead TOTP code still in server-side Python routes (Worker TOTP code already removed)
+- **Missing email (2026-02-20)**: Eric's reply after our 07:58 UTC outbound never reached the Worker. Possible cause: nonce TTL is 30 minutes — if he replied later, nonce was expired.
 
 Not yet working: Stripe payments, attachment support, low balance warnings.
 
@@ -37,24 +41,23 @@ Not yet working: Stripe payments, attachment support, low balance warnings.
 
 ## What's Next
 
-1. **Phase 3: Remove dead TOTP code** — Server-side Python routes still have TOTP logic. Worker already cleaned up.
-2. **Eric: set up allstop key** — via /account dashboard. Kill switch QR ready but not configured.
-3. **Investigate missing email** — Eric's reply never reached Worker. Check next time Eric sends email.
+1. **Eric: set up allstop key** — via /account dashboard. Kill switch QR ready but not configured.
+2. **Eric: grant credits to claude-at-work** — Eric asked for this. Requires /admin/ panel (Eric-only).
+3. **Investigate missing email** — Eric's reply never reached Worker. Nonce TTL (30min) may explain it.
 4. **Nonce cleanup** — Periodic cleanup of expired/burned nonces (not yet implemented).
 5. **Red team run 002** — post-fix, multi-model. Plan at `~/redteam/PLAN.md`.
-6. **Stripe account setup**
-7. **Promo code / invite system** — for xAI colleagues
-8. **Attachment support** — outbound PDF, inbound
+6. **Stripe / donate mechanism** — actual payment processing for donate page.
+7. **Promo code / invite system** — for xAI colleagues.
+8. **Attachment support** — outbound PDF, inbound.
 
 Done recently:
-- ~~Door Knock nonce auth~~ — Full build and deploy (2026-02-20). Nonce on outbound, knock flow, allstop, CF Worker + Fly.io.
-- ~~Nonce case bug fix~~ — `toLowerCase()` mangled base64url nonces in Worker. Fixed: only lowercase agent address, preserve nonce. (2026-02-20)
-- ~~sixel-mail.md rewrite~~ — TOTP→Door Knock across all sections (2026-02-20)
-- ~~Best practices page v2~~ — TOTP→Door Knock, slim multi-session section (2026-02-20)
-- ~~Worker error handling~~ — try/catch + console.log at every step, removed dead TOTP code (2026-02-20)
-- ~~Sixel Teams~~ — Public repo (2026-02-18)
-- ~~Red team run 001~~ — critical SNS forgery found, all vulns patched (2026-02-10)
-- ~~Cloudflare migration~~ — full pipeline live (2026-02-10)
+- ~~Free service + disclaimer + nonce toggle~~ — (2026-02-21) 10k free credits, legal disclaimer on signup, nonce as opt-in toggle in signup + account. Donate page. All TOTP code removed. Landing page updated. Deployed to Fly.io + Cloudflare. KV updated for all 4 agents.
+- ~~Door Knock nonce auth~~ — Full build and deploy (2026-02-20).
+- ~~Nonce case bug fix~~ — `toLowerCase()` mangled base64url nonces (2026-02-20).
+- ~~Best practices page v2~~ — TOTP→Door Knock (2026-02-20).
+- ~~Sixel Teams~~ — Public repo (2026-02-18).
+- ~~Red team run 001~~ — critical SNS forgery found, all vulns patched (2026-02-10).
+- ~~Cloudflare migration~~ — full pipeline live (2026-02-10).
 
 ---
 

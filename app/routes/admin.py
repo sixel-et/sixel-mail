@@ -67,7 +67,7 @@ async def admin_dashboard(request: Request):
     # All agents with user info
     agents = await pool.fetch("""
         SELECT a.id, a.address, a.allowed_contact, a.credit_balance, a.last_seen_at,
-               a.agent_down_notified, a.has_totp, a.created_at,
+               a.agent_down_notified, a.nonce_enabled, a.created_at,
                u.github_username, u.email as user_email,
                (SELECT COUNT(*) FROM messages m WHERE m.agent_id = a.id) as msg_count,
                (SELECT COUNT(*) FROM messages m WHERE m.agent_id = a.id AND m.direction = 'inbound' AND m.is_read = FALSE) as unread_count
@@ -98,7 +98,7 @@ async def admin_dashboard(request: Request):
             status = "never"
             status_color = "#999"
 
-        totp = "yes" if a["has_totp"] else "no"
+        nonce = "yes" if a["nonce_enabled"] else "no"
         agent_rows += f"""
         <tr>
             <td><a href="/admin/agent/{a['id']}">{addr}@sixel.email</a></td>
@@ -106,7 +106,7 @@ async def admin_dashboard(request: Request):
             <td>{a['credit_balance']}</td>
             <td><span style="color:{status_color}">{status}</span></td>
             <td>{a['msg_count']} ({a['unread_count']} unread)</td>
-            <td>{totp}</td>
+            <td>{nonce}</td>
         </tr>"""
 
     flash = ""
@@ -128,7 +128,7 @@ async def admin_dashboard(request: Request):
 
 <h2>All agents</h2>
 <table>
-    <tr><th>Address</th><th>Owner</th><th>Credits</th><th>Last seen</th><th>Messages</th><th>TOTP</th></tr>
+    <tr><th>Address</th><th>Owner</th><th>Credits</th><th>Last seen</th><th>Messages</th><th>Nonce</th></tr>
     {agent_rows}
 </table>
 
@@ -215,7 +215,7 @@ async def admin_agent_detail(agent_id: str, request: Request):
 
     last_seen = agent["last_seen_at"]
     last_seen_str = last_seen.strftime("%Y-%m-%d %H:%M:%S UTC") if last_seen else "never"
-    totp_str = "enabled" if agent.get("has_totp") else "disabled"
+    nonce_str = "enabled" if agent.get("nonce_enabled") else "disabled"
     created_str = agent["created_at"].strftime("%Y-%m-%d %H:%M")
 
     flash = ""
@@ -234,7 +234,7 @@ async def admin_agent_detail(agent_id: str, request: Request):
     <tr><td><strong>Allowed contact</strong></td><td>{esc(agent['allowed_contact'])}</td></tr>
     <tr><td><strong>Credits</strong></td><td>{agent['credit_balance']}</td></tr>
     <tr><td><strong>Last seen</strong></td><td>{last_seen_str}</td></tr>
-    <tr><td><strong>TOTP</strong></td><td>{totp_str}</td></tr>
+    <tr><td><strong>Door Knock</strong></td><td>{nonce_str}</td></tr>
     <tr><td><strong>API key</strong></td><td>{key_info}</td></tr>
     <tr><td><strong>Created</strong></td><td>{created_str}</td></tr>
 </table>
