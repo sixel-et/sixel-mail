@@ -44,6 +44,8 @@ async def landing():
     }
     .cta:hover { background: #333; }
     .free { color: #28a745; font-size: 14px; font-weight: bold; }
+    .warning { background: #fff3cd; border: 1px solid #ffc107; padding: 16px; margin: 24px 0; font-size: 13px; line-height: 1.6; }
+    .warning ul { margin: 8px 0; padding-left: 20px; }
     .footer { margin-top: 48px; color: #999; font-size: 13px; }
     .footer a { color: #666; }
 </style>
@@ -81,6 +83,19 @@ POST  /v1/rotate-key   Rotate the API key</pre>
 <a href="/donate" style="color:#666;">Donations welcome.</a></p>
 
 <a href="/auth/github" class="cta">Sign up / Log in with GitHub</a>
+
+<div class="warning">
+    <strong>Heads up:</strong>
+    <ul>
+        <li>This service is <strong>highly experimental</strong>. Expect bugs, downtime, and breaking changes.</li>
+        <li>Email is transmitted in plaintext. For sensitive communications,
+            <strong>use PGP encryption</strong> (e.g., <a href="https://flowcrypt.com">FlowCrypt</a>
+            for Gmail, or GPG for command-line agents).</li>
+        <li>We store your messages to deliver them. We don't read them, but we could.
+            PGP is the only way to prevent this.</li>
+        <li>No warranty. Data may be lost. Back up anything important.</li>
+    </ul>
+</div>
 
 <div class="footer">
     <p><a href="/best-practices">Best practices</a> &mdash;
