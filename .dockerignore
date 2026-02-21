@@ -4,3 +4,7 @@
 __pycache__/
 *.pyc
 *.md
+node_modules/
+cf-worker/
+tests/
+redteam/

@@ -120,21 +120,26 @@ async def admin_dashboard(request: Request):
             status_color = "#999"
 
         nonce = "yes" if a["nonce_enabled"] else "no"
+        channel = "on" if a.get("channel_active", True) else '<span style="color:#dc3545">OFF</span>'
         agent_rows += f"""
         <tr>
+            <td><input type="checkbox" name="agent_ids" value="{a['id']}" class="agent-check"></td>
             <td><a href="/admin/agent/{a['id']}">{addr}@sixel.email</a></td>
             <td>{esc(a['github_username'])}</td>
             <td>{a['credit_balance']}</td>
             <td><span style="color:{status_color}">{status}</span></td>
             <td>{a['msg_count']} ({a['unread_count']} unread)</td>
             <td>{nonce}</td>
+            <td>{channel}</td>
         </tr>"""
 
     flash = ""
     if request.query_params.get("credited"):
         flash = '<div class="flash">Credits added successfully.</div>'
     elif request.query_params.get("deleted"):
-        flash = '<div class="flash" style="background:#f8d7da;border-color:#f5c6cb;">Agent deleted.</div>'
+        flash = '<div class="flash" style="background:#f8d7da;border-color:#f5c6cb;">Agent(s) deleted.</div>'
+    elif request.query_params.get("bulk_done"):
+        flash = '<div class="flash">Bulk action applied.</div>'
 
     return f"""<!DOCTYPE html>
 <html><head><title>Sixel-Mail Admin</title>{STYLE}</head>
@@ -150,10 +155,24 @@ async def admin_dashboard(request: Request):
 </div>
 
 <h2>All agents</h2>
+<form method="POST" action="/admin/bulk" id="bulk-form">
+<div style="margin:8px 0;display:flex;gap:8px;align-items:center;">
+    <label><input type="checkbox" id="select-all" onchange="document.querySelectorAll('.agent-check').forEach(c=>c.checked=this.checked)"> Select all</label>
+    <select name="action" style="font-family:monospace;font-size:14px;padding:6px;">
+        <option value="">— Bulk action —</option>
+        <option value="enable_channel">Enable channel</option>
+        <option value="disable_channel">Disable channel</option>
+        <option value="enable_nonce">Enable Door Knock</option>
+        <option value="disable_nonce">Disable Door Knock</option>
+        <option value="delete">Delete agents</option>
+    </select>
+    <button type="submit" onclick="if(this.form.action.value==='delete')return confirm('Delete selected agents? Cannot be undone.')">Apply</button>
+</div>
 <table>
-    <tr><th>Address</th><th>Owner</th><th>Credits</th><th>Last seen</th><th>Messages</th><th>Nonce</th></tr>
+    <tr><th style="width:30px;"></th><th>Address</th><th>Owner</th><th>Credits</th><th>Last seen</th><th>Messages</th><th>Nonce</th><th>Channel</th></tr>
     {agent_rows}
 </table>
+</form>
 
 <h2>Quick credit</h2>
 <form method="POST" action="/admin/credits" style="display:flex;gap:8px;align-items:center;">
@@ -342,6 +361,59 @@ async def admin_add_credits(request: Request):
     if f"/admin/agent/{agent_id}" in referer:
         return RedirectResponse(f"/admin/agent/{agent_id}?credited=1", status_code=303)
     return RedirectResponse("/admin/?credited=1", status_code=303)
+
+
+@router.post("/bulk")
+async def admin_bulk_action(request: Request):
+    await _require_admin(request)
+
+    form = await request.form()
+    action = form.get("action", "")
+    agent_ids = form.getlist("agent_ids")
+
+    if not action or not agent_ids:
+        return RedirectResponse("/admin/", status_code=303)
+
+    pool = await get_pool()
+
+    if action == "enable_channel":
+        for aid in agent_ids:
+            await pool.execute("UPDATE agents SET channel_active = TRUE WHERE id = $1", aid)
+        logger.info("Admin bulk enabled channel for %d agents", len(agent_ids))
+    elif action == "disable_channel":
+        for aid in agent_ids:
+            await pool.execute("UPDATE agents SET channel_active = FALSE WHERE id = $1", aid)
+        logger.info("Admin bulk disabled channel for %d agents", len(agent_ids))
+    elif action == "enable_nonce":
+        for aid in agent_ids:
+            agent = await pool.fetchrow("SELECT address, allowed_contact FROM agents WHERE id = $1", aid)
+            if agent:
+                await pool.execute("UPDATE agents SET nonce_enabled = TRUE WHERE id = $1", aid)
+                await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], True)
+        logger.info("Admin bulk enabled nonce for %d agents", len(agent_ids))
+    elif action == "disable_nonce":
+        for aid in agent_ids:
+            agent = await pool.fetchrow("SELECT address, allowed_contact FROM agents WHERE id = $1", aid)
+            if agent:
+                await pool.execute("UPDATE agents SET nonce_enabled = FALSE WHERE id = $1", aid)
+                await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], False)
+        logger.info("Admin bulk disabled nonce for %d agents", len(agent_ids))
+    elif action == "delete":
+        for aid in agent_ids:
+            agent = await pool.fetchrow("SELECT id, address FROM agents WHERE id = $1", aid)
+            if agent:
+                await pool.execute("DELETE FROM nonces WHERE agent_id = $1", agent["id"])
+                await pool.execute("DELETE FROM messages WHERE agent_id = $1", agent["id"])
+                await pool.execute("DELETE FROM credit_transactions WHERE agent_id = $1", agent["id"])
+                await pool.execute("DELETE FROM api_keys WHERE agent_id = $1", agent["id"])
+                await pool.execute("DELETE FROM agents WHERE id = $1", agent["id"])
+                await _delete_agent_from_kv(agent["address"])
+                logger.warning("Admin bulk deleted agent %s", agent["address"])
+
+    param = "bulk_done"
+    if action == "delete":
+        param = "deleted"
+    return RedirectResponse(f"/admin/?{param}=1", status_code=303)
 
 
 @router.post("/agent/{agent_id}/toggle-nonce")
