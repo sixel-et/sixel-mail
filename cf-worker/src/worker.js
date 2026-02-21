@@ -6,11 +6,14 @@
  * 2. Checks sender against allowed contact
  * 3. If nonce_enabled: extracts nonce from + addressing for validation
  *    If not: forwards email directly (no nonce required)
- * 4. Forwards processed message to our webhook
+ * 4. Extracts text body and attachments from MIME
+ * 5. Forwards processed message to our webhook
  *
  * Cloudflare Email Routing enforces DMARC at the SMTP level before
  * email reaches this Worker — spoofed senders are already rejected.
  */
+
+const MAX_ATTACHMENT_TOTAL = 10 * 1024 * 1024; // 10MB decoded
 
 export default {
   async email(message, env, ctx) {
@@ -43,10 +46,10 @@ export default {
         return;
       }
 
-      // Parse the email to extract subject and body
+      // Parse the email to extract subject, body, and attachments
       const rawEmail = await streamToString(message.raw);
-      const { subject, body } = parseEmail(rawEmail);
-      console.log(`Parsed email: subject="${subject}", body_length=${body.length}`);
+      const { subject, body, attachments } = parseEmail(rawEmail);
+      console.log(`Parsed email: subject="${subject}", body_length=${body.length}, attachments=${attachments.length}`);
 
       // Forward to our webhook
       const payload = {
@@ -62,6 +65,11 @@ export default {
       // Allstop keys also use + addressing and must always work.
       if (noncePart) {
         payload.nonce = noncePart;
+      }
+
+      // Include attachments if any
+      if (attachments.length > 0) {
+        payload.attachments = attachments;
       }
 
       console.log(`Forwarding to webhook: ${env.WEBHOOK_URL}`);
@@ -108,7 +116,7 @@ async function streamToString(stream) {
 }
 
 /**
- * Simple email parser — extracts Subject header and text/plain body
+ * Simple email parser — extracts Subject header, text/plain body, and attachments
  */
 function parseEmail(rawEmail) {
   // Split headers from body
@@ -129,19 +137,22 @@ function parseEmail(rawEmail) {
     subject = subjectMatch[1].trim();
   }
 
-  // For multipart emails, try to extract text/plain part
+  // For multipart emails, extract text/plain body and attachments
   const contentTypeMatch = headerPart.match(
     /^Content-Type:\s*multipart\/\w+;\s*boundary="?([^"\s;]+)"?/im
   );
 
   let body;
+  let attachments = [];
   if (contentTypeMatch) {
-    body = extractTextPlain(bodyPart, contentTypeMatch[1]);
+    const boundary = contentTypeMatch[1];
+    body = extractTextPlain(bodyPart, boundary);
+    attachments = extractAttachments(bodyPart, boundary);
   } else {
     body = bodyPart;
   }
 
-  return { subject, body: body || "(no body)" };
+  return { subject, body: body || "(no body)", attachments };
 }
 
 /**
@@ -170,3 +181,97 @@ function extractTextPlain(body, boundary) {
   return body;
 }
 
+/**
+ * Extract attachments from multipart MIME body.
+ * Returns array of { filename, mimeType, contentBase64 }
+ */
+function extractAttachments(body, boundary) {
+  const attachments = [];
+  const parts = body.split("--" + boundary);
+  let totalSize = 0;
+
+  for (const part of parts) {
+    if (part.trim() === "--" || part.trim() === "") continue;
+
+    const partHeaderEnd = part.indexOf("\r\n\r\n");
+    const partSplit =
+      partHeaderEnd !== -1 ? partHeaderEnd : part.indexOf("\n\n");
+    if (partSplit === -1) continue;
+
+    const partHeaders = part.substring(0, partSplit);
+    const partBody = part.substring(
+      partSplit + (partHeaderEnd !== -1 ? 4 : 2)
+    ).trim();
+
+    // Skip text/plain and text/html parts (those are the email body, not attachments)
+    if (partHeaders.match(/Content-Type:\s*text\/(plain|html)/i) &&
+        !partHeaders.match(/Content-Disposition:\s*attachment/i)) {
+      continue;
+    }
+
+    // Look for attachment-like parts: Content-Disposition: attachment, or
+    // non-text Content-Type with a filename
+    const dispositionMatch = partHeaders.match(
+      /Content-Disposition:\s*(?:attachment|inline)[^]*?filename="?([^";\r\n]+)"?/i
+    );
+    const contentTypeHeaderMatch = partHeaders.match(
+      /Content-Type:\s*([^\s;]+)/i
+    );
+
+    // Also check for filename in Content-Type header (some clients put it there)
+    const ctFilenameMatch = partHeaders.match(
+      /Content-Type:[^]*?name="?([^";\r\n]+)"?/i
+    );
+
+    const filename = dispositionMatch
+      ? dispositionMatch[1].trim()
+      : ctFilenameMatch
+        ? ctFilenameMatch[1].trim()
+        : null;
+
+    // Must have a filename to be treated as an attachment
+    if (!filename) continue;
+
+    const mimeType = contentTypeHeaderMatch
+      ? contentTypeHeaderMatch[1].trim()
+      : "application/octet-stream";
+
+    // Check Content-Transfer-Encoding
+    const encodingMatch = partHeaders.match(
+      /Content-Transfer-Encoding:\s*([^\r\n]+)/i
+    );
+    const encoding = encodingMatch
+      ? encodingMatch[1].toLowerCase().trim()
+      : "7bit";
+
+    let contentBase64;
+    if (encoding === "base64") {
+      // Already base64 — just clean up whitespace
+      contentBase64 = partBody.replace(/\s/g, "");
+    } else {
+      // For other encodings (7bit, 8bit, quoted-printable), encode to base64
+      // Use btoa for simple cases — this handles ASCII and latin1
+      try {
+        contentBase64 = btoa(partBody);
+      } catch (e) {
+        // btoa fails on non-latin1 chars; skip this attachment
+        console.log(`Skipping attachment ${filename}: encoding error`);
+        continue;
+      }
+    }
+
+    // Estimate decoded size (base64 is ~4/3 of original)
+    const estimatedSize = Math.ceil(contentBase64.length * 3 / 4);
+    totalSize += estimatedSize;
+
+    if (totalSize > MAX_ATTACHMENT_TOTAL) {
+      console.log(`Attachment total exceeds ${MAX_ATTACHMENT_TOTAL / 1024 / 1024}MB limit, stopping extraction`);
+      break;
+    }
+
+    attachments.push({ filename, mimeType, contentBase64 });
+    console.log(`Extracted attachment: ${filename} (${mimeType}, ~${estimatedSize} bytes)`);
+  }
+
+  return attachments;
+}

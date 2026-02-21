@@ -1,6 +1,8 @@
+import base64
 import hashlib
 import hmac
 import logging
+import mimetypes
 import time
 
 import stripe
@@ -21,6 +23,37 @@ router = APIRouter(prefix="/webhooks")
 _knock_timestamps: dict[str, list[float]] = {}
 KNOCK_RATE_LIMIT = 10  # max knocks per window
 KNOCK_RATE_WINDOW = 60  # seconds
+
+
+MAX_ATTACHMENT_TOTAL = 10_000_000  # 10MB decoded
+
+
+async def _store_inbound_attachments(pool, message_id, attachments: list[dict]):
+    """Store attachments from the Worker payload into the attachments table."""
+    total_size = 0
+    for att in attachments:
+        content_b64 = att.get("contentBase64", "")
+        filename = att.get("filename", "unnamed")
+        mime_type = att.get("mimeType", "application/octet-stream")
+
+        # Estimate decoded size
+        decoded_size = len(content_b64) * 3 // 4
+        total_size += decoded_size
+        if total_size > MAX_ATTACHMENT_TOTAL:
+            logger.warning("Inbound attachments exceed size limit, truncating")
+            break
+
+        await pool.execute(
+            """
+            INSERT INTO attachments (message_id, filename, mime_type, size_bytes, content_base64)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            message_id,
+            filename,
+            mime_type,
+            decoded_size,
+            content_b64,
+        )
 
 
 def _check_knock_rate(agent_id: str) -> bool:
@@ -66,6 +99,7 @@ async def cf_inbound(request: Request):
     message_body = body.get("body", "")
     encrypted = body.get("encrypted", False)
     nonce_str = body.get("nonce")  # Extracted by Worker from + addressing
+    attachments = body.get("attachments", [])  # [{filename, mimeType, contentBase64}]
 
     if not agent_address or not from_addr:
         raise HTTPException(status_code=400, detail="Missing required fields")
@@ -121,17 +155,20 @@ async def cf_inbound(request: Request):
             logger.info("Dropped inbound for %s (no credits)", agent_address)
             return {"status": "dropped", "reason": "insufficient_credits"}
 
-        await pool.execute(
+        row = await pool.fetchrow(
             """
             INSERT INTO messages (agent_id, direction, subject, body, is_read, encrypted)
             VALUES ($1, 'inbound', $2, $3, FALSE, $4)
+            RETURNING id
             """,
             agent["id"],
             subject,
             message_body,
             encrypted,
         )
-        logger.info("Message received for %s (nonce disabled, direct accept)", agent_address)
+        if attachments:
+            await _store_inbound_attachments(pool, row["id"], attachments)
+        logger.info("Message received for %s (nonce disabled, direct accept, %d attachments)", agent_address, len(attachments))
         return {"status": "received"}
 
     # --- NONCE VALIDATION PATH (nonce_enabled=true) ---
@@ -152,17 +189,20 @@ async def cf_inbound(request: Request):
             return {"status": "dropped", "reason": "insufficient_credits"}
 
         # Store message
-        await pool.execute(
+        row = await pool.fetchrow(
             """
             INSERT INTO messages (agent_id, direction, subject, body, is_read, encrypted)
             VALUES ($1, 'inbound', $2, $3, FALSE, $4)
+            RETURNING id
             """,
             agent["id"],
             subject,
             message_body,
             encrypted,
         )
-        logger.info("Authenticated message received for %s (nonce valid)", agent_address)
+        if attachments:
+            await _store_inbound_attachments(pool, row["id"], attachments)
+        logger.info("Authenticated message received for %s (nonce valid, %d attachments)", agent_address, len(attachments))
         return {"status": "received"}
 
     # --- KNOCK PATH (no nonce, from allowed contact, nonce_enabled=true) ---

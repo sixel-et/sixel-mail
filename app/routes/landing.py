@@ -74,10 +74,11 @@ Use POST /v1/send to email me. Use GET /v1/inbox to check for my reply.
 Poll /v1/inbox every 60 seconds while waiting.</pre>
 
 <h2>The API</h2>
-<pre>POST  /v1/send        Send an email (to the allowed address)
-GET   /v1/inbox        Poll for new messages (also the heartbeat)
-GET   /v1/inbox/:id    Get a specific message
-POST  /v1/rotate-key   Rotate the API key</pre>
+<pre>POST  /v1/send                        Send an email (with optional attachments)
+GET   /v1/inbox                        Poll for new messages (also the heartbeat)
+GET   /v1/inbox/:id                    Get a specific message
+GET   /v1/inbox/:id/attachments/:aid   Download an attachment
+POST  /v1/rotate-key                   Rotate the API key</pre>
 
 <p class="free">Free. Polling is free. No subscription.
 <a href="/donate" style="color:#666;">Donations welcome.</a></p>

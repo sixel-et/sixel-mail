@@ -184,11 +184,12 @@ async def admin_agent_detail(agent_id: str, request: Request):
     esc = html.escape
     addr = esc(agent["address"])
 
-    # Messages (last 50)
+    # Messages (last 50) with attachment counts
     messages = await pool.fetch("""
-        SELECT id, direction, subject, body, is_read, encrypted, created_at
-        FROM messages WHERE agent_id = $1
-        ORDER BY created_at DESC LIMIT 50
+        SELECT m.id, m.direction, m.subject, m.body, m.is_read, m.encrypted, m.created_at,
+               (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.id) as attachment_count
+        FROM messages m WHERE m.agent_id = $1
+        ORDER BY m.created_at DESC LIMIT 50
     """, agent_id)
 
     msg_rows = ""
@@ -200,11 +201,12 @@ async def admin_agent_detail(agent_id: str, request: Request):
         if m.get("encrypted"):
             body_preview = "<em>(encrypted)</em>"
         read_mark = "" if m["is_read"] or m["direction"] == "outbound" else " <strong>NEW</strong>"
+        att_badge = f' <span style="color:#0066cc;font-size:11px;">({m["attachment_count"]} file{"s" if m["attachment_count"] != 1 else ""})</span>' if m["attachment_count"] > 0 else ""
         msg_rows += f"""
         <tr>
             <td>{time_str}</td>
             <td>{arrow}{read_mark}</td>
-            <td>{subj}</td>
+            <td>{subj}{att_badge}</td>
             <td style="font-size:12px;color:#666;">{body_preview}</td>
         </tr>"""
 
