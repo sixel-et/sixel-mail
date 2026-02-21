@@ -156,7 +156,8 @@ function parseEmail(rawEmail) {
 }
 
 /**
- * Extract text/plain part from multipart MIME body
+ * Extract text/plain part from multipart MIME body.
+ * Handles nested multipart (e.g. multipart/related containing multipart/alternative).
  */
 function extractTextPlain(body, boundary) {
   const parts = body.split("--" + boundary);
@@ -173,22 +174,40 @@ function extractTextPlain(body, boundary) {
       partSplit + (partHeaderEnd !== -1 ? 4 : 2)
     );
 
+    // Direct text/plain match
     if (partHeaders.match(/Content-Type:\s*text\/plain/i)) {
       return partBody.trim();
     }
+
+    // Nested multipart — recurse
+    const nestedBoundary = partHeaders.match(
+      /Content-Type:\s*multipart\/\w+;\s*boundary="?([^"\s;]+)"?/i
+    );
+    if (nestedBoundary) {
+      const nested = extractTextPlain(partBody, nestedBoundary[1]);
+      if (nested) return nested;
+    }
   }
-  // Fallback: return the whole body
-  return body;
+  // No text/plain found — return empty rather than dumping raw MIME
+  return "";
 }
 
 /**
  * Extract attachments from multipart MIME body.
+ * Handles nested multipart (e.g. multipart/related with inline images).
  * Returns array of { filename, mimeType, contentBase64 }
  */
 function extractAttachments(body, boundary) {
   const attachments = [];
-  const parts = body.split("--" + boundary);
   let totalSize = 0;
+
+  _extractAttachmentsRecursive(body, boundary, attachments, { totalSize: 0 });
+
+  return attachments;
+}
+
+function _extractAttachmentsRecursive(body, boundary, attachments, sizeTracker) {
+  const parts = body.split("--" + boundary);
 
   for (const part of parts) {
     if (part.trim() === "--" || part.trim() === "") continue;
@@ -203,14 +222,23 @@ function extractAttachments(body, boundary) {
       partSplit + (partHeaderEnd !== -1 ? 4 : 2)
     ).trim();
 
+    // Recurse into nested multipart
+    const nestedBoundary = partHeaders.match(
+      /Content-Type:\s*multipart\/\w+;\s*boundary="?([^"\s;]+)"?/i
+    );
+    if (nestedBoundary) {
+      _extractAttachmentsRecursive(partBody, nestedBoundary[1], attachments, sizeTracker);
+      continue;
+    }
+
     // Skip text/plain and text/html parts (those are the email body, not attachments)
     if (partHeaders.match(/Content-Type:\s*text\/(plain|html)/i) &&
         !partHeaders.match(/Content-Disposition:\s*attachment/i)) {
       continue;
     }
 
-    // Look for attachment-like parts: Content-Disposition: attachment, or
-    // non-text Content-Type with a filename
+    // Look for attachment-like parts: Content-Disposition: attachment/inline with filename,
+    // or non-text Content-Type with a filename
     const dispositionMatch = partHeaders.match(
       /Content-Disposition:\s*(?:attachment|inline)[^]*?filename="?([^";\r\n]+)"?/i
     );
@@ -250,11 +278,9 @@ function extractAttachments(body, boundary) {
       contentBase64 = partBody.replace(/\s/g, "");
     } else {
       // For other encodings (7bit, 8bit, quoted-printable), encode to base64
-      // Use btoa for simple cases — this handles ASCII and latin1
       try {
         contentBase64 = btoa(partBody);
       } catch (e) {
-        // btoa fails on non-latin1 chars; skip this attachment
         console.log(`Skipping attachment ${filename}: encoding error`);
         continue;
       }
@@ -262,16 +288,14 @@ function extractAttachments(body, boundary) {
 
     // Estimate decoded size (base64 is ~4/3 of original)
     const estimatedSize = Math.ceil(contentBase64.length * 3 / 4);
-    totalSize += estimatedSize;
+    sizeTracker.totalSize += estimatedSize;
 
-    if (totalSize > MAX_ATTACHMENT_TOTAL) {
+    if (sizeTracker.totalSize > MAX_ATTACHMENT_TOTAL) {
       console.log(`Attachment total exceeds ${MAX_ATTACHMENT_TOTAL / 1024 / 1024}MB limit, stopping extraction`);
-      break;
+      return;
     }
 
     attachments.push({ filename, mimeType, contentBase64 });
     console.log(`Extracted attachment: ${filename} (${mimeType}, ~${estimatedSize} bytes)`);
   }
-
-  return attachments;
 }
