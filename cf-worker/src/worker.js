@@ -206,6 +206,9 @@ function extractAttachments(body, boundary) {
   return attachments;
 }
 
+// Exported for testing
+export { parseEmail, extractTextPlain, extractAttachments, extractEmail };
+
 function _extractAttachmentsRecursive(body, boundary, attachments, sizeTracker) {
   const parts = body.split("--" + boundary);
 

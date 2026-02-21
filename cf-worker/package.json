@@ -5,9 +5,11 @@
   "main": "src/worker.js",
   "scripts": {
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "test": "vitest run"
   },
   "devDependencies": {
+    "vitest": "^4.0.18",
     "wrangler": "^3.0.0"
   }
 }
