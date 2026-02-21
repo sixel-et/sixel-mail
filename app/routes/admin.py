@@ -1,15 +1,36 @@
 import html
 import logging
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from app.config import settings
 from app.db import get_pool
-from app.routes.signup import get_user_id
+from app.routes.signup import _sync_agent_to_kv, get_user_id
 from app.services.credits import add_credits
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin")
+
+
+async def _delete_agent_from_kv(address: str):
+    """Remove agent from Cloudflare KV so the Worker stops accepting email."""
+    if not settings.cf_account_id or not settings.cf_kv_namespace_id or not settings.cf_api_token:
+        return
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.delete(
+                f"https://api.cloudflare.com/client/v4/accounts/{settings.cf_account_id}"
+                f"/storage/kv/namespaces/{settings.cf_kv_namespace_id}/values/{address}",
+                headers={"Authorization": f"Bearer {settings.cf_api_token}"},
+            )
+            if resp.status_code == 200:
+                logger.info("Deleted agent %s from Cloudflare KV", address)
+            else:
+                logger.error("Failed to delete %s from KV: %s %s", address, resp.status_code, resp.text)
+    except Exception:
+        logger.exception("Error deleting agent %s from Cloudflare KV", address)
 
 # Admin access: GitHub user IDs allowed to access the admin panel
 ADMIN_GITHUB_IDS = {6231816}  # estbiostudent (Eric)
@@ -112,6 +133,8 @@ async def admin_dashboard(request: Request):
     flash = ""
     if request.query_params.get("credited"):
         flash = '<div class="flash">Credits added successfully.</div>'
+    elif request.query_params.get("deleted"):
+        flash = '<div class="flash" style="background:#f8d7da;border-color:#f5c6cb;">Agent deleted.</div>'
 
     return f"""<!DOCTYPE html>
 <html><head><title>Sixel-Mail Admin</title>{STYLE}</head>
@@ -215,12 +238,20 @@ async def admin_agent_detail(agent_id: str, request: Request):
 
     last_seen = agent["last_seen_at"]
     last_seen_str = last_seen.strftime("%Y-%m-%d %H:%M:%S UTC") if last_seen else "never"
-    nonce_str = "enabled" if agent.get("nonce_enabled") else "disabled"
+    nonce_enabled = agent.get("nonce_enabled", False)
+    nonce_str = "enabled" if nonce_enabled else "disabled"
+    channel_active = agent.get("channel_active", True)
+    channel_str = "active" if channel_active else "DISABLED"
+    channel_color = "#28a745" if channel_active else "#dc3545"
     created_str = agent["created_at"].strftime("%Y-%m-%d %H:%M")
 
     flash = ""
     if request.query_params.get("credited"):
         flash = '<div class="flash">Credits added successfully.</div>'
+    elif request.query_params.get("nonce_toggled"):
+        flash = f'<div class="flash">Door Knock {"enabled" if nonce_enabled else "disabled"}.</div>'
+    elif request.query_params.get("channel_toggled"):
+        flash = f'<div class="flash">Channel {"enabled" if channel_active else "disabled"}.</div>'
 
     return f"""<!DOCTYPE html>
 <html><head><title>Admin — {addr}@sixel.email</title>{STYLE}</head>
@@ -235,9 +266,22 @@ async def admin_agent_detail(agent_id: str, request: Request):
     <tr><td><strong>Credits</strong></td><td>{agent['credit_balance']}</td></tr>
     <tr><td><strong>Last seen</strong></td><td>{last_seen_str}</td></tr>
     <tr><td><strong>Door Knock</strong></td><td>{nonce_str}</td></tr>
+    <tr><td><strong>Channel</strong></td><td><span style="color:{channel_color}">{channel_str}</span></td></tr>
     <tr><td><strong>API key</strong></td><td>{key_info}</td></tr>
     <tr><td><strong>Created</strong></td><td>{created_str}</td></tr>
 </table>
+
+<h3>Actions</h3>
+<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+    <form method="POST" action="/admin/agent/{agent_id}/toggle-nonce" style="margin:0;">
+        <button type="submit">{'Disable' if nonce_enabled else 'Enable'} Door Knock</button>
+    </form>
+    <form method="POST" action="/admin/agent/{agent_id}/toggle-channel" style="margin:0;">
+        <button type="submit" class="{'danger' if channel_active else ''}">
+            {'Disable channel' if channel_active else 'Enable channel'}
+        </button>
+    </form>
+</div>
 
 <h3>Add credits</h3>
 <form method="POST" action="/admin/credits" style="display:flex;gap:8px;align-items:center;">
@@ -245,6 +289,12 @@ async def admin_agent_detail(agent_id: str, request: Request):
     <input type="number" name="amount" value="100" min="1" max="10000">
     <input type="text" name="reason" value="admin_grant" style="font-family:monospace;font-size:14px;padding:6px;width:150px;">
     <button type="submit">Add credits</button>
+</form>
+
+<h3>Danger zone</h3>
+<form method="POST" action="/admin/agent/{agent_id}/delete"
+      onsubmit="return confirm('Delete {addr}@sixel.email? This removes the agent, all messages, API keys, and KV entry. Cannot be undone.');">
+    <button type="submit" class="danger">Delete agent</button>
 </form>
 
 <h2>Messages (last 50)</h2>
@@ -290,3 +340,67 @@ async def admin_add_credits(request: Request):
     if f"/admin/agent/{agent_id}" in referer:
         return RedirectResponse(f"/admin/agent/{agent_id}?credited=1", status_code=303)
     return RedirectResponse("/admin/?credited=1", status_code=303)
+
+
+@router.post("/agent/{agent_id}/toggle-nonce")
+async def admin_toggle_nonce(agent_id: str, request: Request):
+    await _require_admin(request)
+    pool = await get_pool()
+
+    agent = await pool.fetchrow(
+        "SELECT id, address, allowed_contact, nonce_enabled FROM agents WHERE id = $1",
+        agent_id,
+    )
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    new_value = not agent["nonce_enabled"]
+    await pool.execute("UPDATE agents SET nonce_enabled = $1 WHERE id = $2", new_value, agent["id"])
+    await _sync_agent_to_kv(agent["address"], agent["allowed_contact"], new_value)
+    logger.info("Admin toggled nonce for %s: %s", agent["address"], new_value)
+
+    return RedirectResponse(f"/admin/agent/{agent_id}?nonce_toggled=1", status_code=303)
+
+
+@router.post("/agent/{agent_id}/toggle-channel")
+async def admin_toggle_channel(agent_id: str, request: Request):
+    await _require_admin(request)
+    pool = await get_pool()
+
+    agent = await pool.fetchrow(
+        "SELECT id, address, channel_active FROM agents WHERE id = $1",
+        agent_id,
+    )
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    new_value = not agent["channel_active"]
+    await pool.execute("UPDATE agents SET channel_active = $1 WHERE id = $2", new_value, agent["id"])
+    logger.info("Admin toggled channel for %s: %s", agent["address"], new_value)
+
+    return RedirectResponse(f"/admin/agent/{agent_id}?channel_toggled=1", status_code=303)
+
+
+@router.post("/agent/{agent_id}/delete")
+async def admin_delete_agent(agent_id: str, request: Request):
+    await _require_admin(request)
+    pool = await get_pool()
+
+    agent = await pool.fetchrow("SELECT id, address FROM agents WHERE id = $1", agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    address = agent["address"]
+
+    # Delete in order: nonces, messages, credit_transactions, api_keys, agent
+    await pool.execute("DELETE FROM nonces WHERE agent_id = $1", agent["id"])
+    await pool.execute("DELETE FROM messages WHERE agent_id = $1", agent["id"])
+    await pool.execute("DELETE FROM credit_transactions WHERE agent_id = $1", agent["id"])
+    await pool.execute("DELETE FROM api_keys WHERE agent_id = $1", agent["id"])
+    await pool.execute("DELETE FROM agents WHERE id = $1", agent["id"])
+
+    # Remove from Cloudflare KV
+    await _delete_agent_from_kv(address)
+
+    logger.warning("Admin deleted agent %s", address)
+    return RedirectResponse("/admin/?deleted=1", status_code=303)
