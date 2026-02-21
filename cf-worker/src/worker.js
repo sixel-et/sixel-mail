@@ -4,14 +4,13 @@
  * Receives inbound email via Cloudflare Email Routing, then:
  * 1. Looks up agent by recipient address (from KV)
  * 2. Checks sender against allowed contact
- * 3. If TOTP-enabled: extracts TOTP code from body, encrypts body, strips code
+ * 3. If nonce_enabled: extracts nonce from + addressing for validation
+ *    If not: forwards email directly (no nonce required)
  * 4. Forwards processed message to our webhook
  *
  * Cloudflare Email Routing enforces DMARC at the SMTP level before
  * email reaches this Worker — spoofed senders are already rejected.
  */
-
-import { EmailMessage } from "cloudflare:email";
 
 export default {
   async email(message, env, ctx) {
@@ -49,7 +48,7 @@ export default {
       const { subject, body } = parseEmail(rawEmail);
       console.log(`Parsed email: subject="${subject}", body_length=${body.length}`);
 
-      // Forward to our webhook (include nonce if present from + addressing)
+      // Forward to our webhook
       const payload = {
         agent_address: agentAddress,
         from: senderEmail,
@@ -57,6 +56,10 @@ export default {
         body: body,
         encrypted: false,
       };
+
+      // Always forward the + part — the webhook handler decides whether to
+      // validate it as a nonce based on agent's nonce_enabled setting.
+      // Allstop keys also use + addressing and must always work.
       if (noncePart) {
         payload.nonce = noncePart;
       }
@@ -167,101 +170,3 @@ function extractTextPlain(body, boundary) {
   return body;
 }
 
-/**
- * Extract TOTP code from body and encrypt.
- *
- * Looks for a 6-digit code on the first or last non-empty line.
- * If found: derives AES-256-GCM key from the code, encrypts the body
- * (minus the TOTP line), returns base64(iv + ciphertext + tag).
- *
- * Returns null if no TOTP code found.
- */
-async function extractAndEncrypt(body, agentAddress) {
-  const lines = body.split("\n");
-  const nonEmptyLines = [];
-  const lineIndices = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].trim() !== "") {
-      nonEmptyLines.push(lines[i].trim());
-      lineIndices.push(i);
-    }
-  }
-
-  if (nonEmptyLines.length === 0) return null;
-
-  let totpCode = null;
-  let totpLineIndex = -1;
-
-  // Check first non-empty line
-  if (/^\d{6}$/.test(nonEmptyLines[0])) {
-    totpCode = nonEmptyLines[0];
-    totpLineIndex = lineIndices[0];
-  }
-  // Check last non-empty line
-  else if (
-    nonEmptyLines.length > 1 &&
-    /^\d{6}$/.test(nonEmptyLines[nonEmptyLines.length - 1])
-  ) {
-    totpCode = nonEmptyLines[nonEmptyLines.length - 1];
-    totpLineIndex = lineIndices[lineIndices.length - 1];
-  }
-
-  if (!totpCode) return null;
-
-  // Remove the TOTP line from the body
-  const cleanLines = lines.filter((_, i) => i !== totpLineIndex);
-  const cleanBody = cleanLines.join("\n").trim();
-
-  // Derive AES-256 key from TOTP code using PBKDF2
-  const encoder = new TextEncoder();
-  const salt = encoder.encode(agentAddress + ":" + getDateString());
-
-  const keyMaterial = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(totpCode),
-    "PBKDF2",
-    false,
-    ["deriveKey"]
-  );
-
-  const aesKey = await crypto.subtle.deriveKey(
-    {
-      name: "PBKDF2",
-      salt: salt,
-      iterations: 100000,
-      hash: "SHA-256",
-    },
-    keyMaterial,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt"]
-  );
-
-  // Encrypt with AES-256-GCM
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: iv },
-    aesKey,
-    encoder.encode(cleanBody)
-  );
-
-  // Combine: iv (12 bytes) + ciphertext (includes 16-byte GCM tag)
-  const combined = new Uint8Array(iv.length + ciphertext.byteLength);
-  combined.set(iv);
-  combined.set(new Uint8Array(ciphertext), iv.length);
-
-  // Return as base64
-  return {
-    ciphertext: btoa(String.fromCharCode(...combined)),
-  };
-}
-
-/**
- * Get current date string for PBKDF2 salt (YYYY-MM-DD)
- * Using date ensures the same TOTP code produces different keys on different days
- */
-function getDateString() {
-  const d = new Date();
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
-}

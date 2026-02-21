@@ -40,7 +40,7 @@ async def heartbeat_loop():
             overdue = await pool.fetch(
                 """
                 SELECT id, address, allowed_contact, credit_balance,
-                       last_seen_at, user_id
+                       last_seen_at, user_id, nonce_enabled
                 FROM agents
                 WHERE alert_status = 'active'
                   AND last_seen_at IS NOT NULL
@@ -61,9 +61,12 @@ async def heartbeat_loop():
                     agent_id, address, credits, f"OFFLINE (last seen: {last_seen})"
                 )
 
-                # Generate nonce for alert reply-to (no credit deduction)
-                alert_nonce = await generate_nonce(pool, agent_id)
-                alert_reply_to = build_reply_to(address, alert_nonce)
+                # Generate nonce for alert reply-to (only if nonce_enabled)
+                if agent.get("nonce_enabled", False):
+                    alert_nonce = await generate_nonce(pool, agent_id)
+                    alert_reply_to = build_reply_to(address, alert_nonce)
+                else:
+                    alert_reply_to = f"{address}@{settings.mail_domain}"
 
                 await send_email(
                     from_address=f"{address}@{settings.mail_domain}",

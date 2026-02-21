@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _sync_agent_to_kv(address: str, allowed_contact: str, has_totp: bool):
+async def _sync_agent_to_kv(address: str, allowed_contact: str, nonce_enabled: bool):
     """Push agent→contact mapping to Cloudflare KV for the Email Worker.
 
     The Worker uses this to check allowed contacts at the edge.
@@ -28,7 +28,7 @@ async def _sync_agent_to_kv(address: str, allowed_contact: str, has_totp: bool):
 
     value = json.dumps({
         "allowed_contact": allowed_contact.lower(),
-        "has_totp": has_totp,
+        "nonce_enabled": nonce_enabled,
     })
 
     try:
@@ -163,7 +163,7 @@ async def github_callback(code: str):
     return response
 
 
-# Step 3: Setup page — pick agent address, set allowed contact, optional TOTP
+# Step 3: Setup page — pick agent address, set allowed contact, optional nonce
 @router.get("/setup", response_class=HTMLResponse)
 async def setup_page(request: Request):
     user_id = get_user_id(request)
@@ -174,17 +174,16 @@ async def setup_page(request: Request):
 <style>
     body {{ font-family: monospace; max-width: 600px; margin: 40px auto; padding: 0 20px; }}
     input, button {{ font-family: monospace; font-size: 16px; padding: 8px; }}
-    input {{ width: 100%; box-sizing: border-box; margin: 8px 0; }}
+    input[type="text"], input[type="email"] {{ width: 100%; box-sizing: border-box; margin: 8px 0; }}
     button {{ cursor: pointer; background: #000; color: #fff; border: none; padding: 10px 20px; }}
     .suffix {{ color: #666; }}
-    .totp-section {{ background: #f8f8f8; border: 1px solid #ddd; padding: 16px; margin: 16px 0; display: none; }}
-    .totp-section.active {{ display: block; }}
-    #qr-code {{ margin: 12px 0; }}
-    .secret-display {{ background: #fff; border: 1px solid #ccc; padding: 8px; font-size: 18px; letter-spacing: 2px; word-break: break-all; }}
     .toggle-label {{ cursor: pointer; user-select: none; }}
     .note {{ color: #666; font-size: 13px; margin: 4px 0; }}
+    .disclaimer {{ background: #fff3cd; border: 1px solid #ffc107; padding: 16px; margin: 16px 0; font-size: 13px; line-height: 1.6; }}
+    .disclaimer ul {{ margin: 8px 0; padding-left: 20px; }}
+    .nonce-info {{ background: #f0f7ff; border: 1px solid #cce0ff; padding: 12px; margin: 8px 0; font-size: 13px; display: none; }}
+    .nonce-info.active {{ display: block; }}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
 </head>
 <body>
 <h1>sixel.email</h1>
@@ -197,94 +196,51 @@ async def setup_page(request: Request):
     <input type="email" name="allowed_contact" required><br><br>
 
     <label class="toggle-label">
-        <input type="checkbox" id="totp-toggle" name="enable_totp" value="1">
-        Enable TOTP encryption (recommended)
+        <input type="checkbox" id="nonce-toggle" name="nonce_enabled" value="1">
+        Enable Door Knock verification
     </label>
-    <p class="note">Encrypts your messages so even our server can't read them. Requires any authenticator app.</p>
+    <p class="note">Adds a single-use nonce to every outbound reply-to address.
+    Your replies are verified automatically. Prevents unauthorized use of the channel
+    even if your email account is compromised.</p>
+    <div class="nonce-info" id="nonce-info">
+        When enabled, your agent's emails will have a reply-to like
+        <code>agent+nonce@sixel.email</code>. Just reply normally &mdash; the nonce
+        validates automatically. To send a new email (not a reply), send to
+        <code>agent@sixel.email</code> and you'll get an auto-reply you can respond to.
+    </div>
+    <br>
 
-    <div class="totp-section" id="totp-section">
-        <h3>TOTP Setup</h3>
-        <p>Scan this QR code with your authenticator app (Google Authenticator, Authy, 1Password, etc.):</p>
-        <div id="qr-code"></div>
-        <p>Or copy this secret manually:</p>
-        <div class="secret-display" id="totp-secret-display"></div>
-        <button type="button" onclick="copySecret()" style="margin-top: 8px; font-size: 13px; padding: 6px 12px;">Copy secret</button>
-        <p class="note">This secret is generated in your browser. It never leaves this page. Save it — you'll need to give it to your agent.</p>
-        <input type="hidden" name="has_totp" id="has-totp" value="0">
+    <div class="disclaimer">
+        <strong>Before you continue:</strong>
+        <ul>
+            <li>This service is <strong>highly experimental</strong>. Expect bugs, downtime, and breaking changes.</li>
+            <li>Email is transmitted in plaintext. For sensitive communications,
+                <strong>use PGP encryption</strong> (e.g., <a href="https://flowcrypt.com">FlowCrypt</a>
+                for Gmail, or GPG for command-line agents).</li>
+            <li>We store your messages to deliver them. We don't read them, but we could.
+                PGP is the only way to prevent this.</li>
+            <li>Your agent can only email the one address you specify. No spam, no outreach.</li>
+            <li>We may terminate accounts that abuse the service.</li>
+            <li>No warranty. Data may be lost. Back up anything important.</li>
+        </ul>
+        <label class="toggle-label">
+            <input type="checkbox" name="accept_terms" value="1" required>
+            <strong>I understand and accept these terms</strong>
+        </label>
     </div>
     <br>
     <button type="submit">Create agent</button>
 </form>
 
 <script>
-// Generate a random TOTP secret (base32, 20 bytes = 32 chars)
-function generateSecret() {{
-    const bytes = new Uint8Array(20);
-    crypto.getRandomValues(bytes);
-    const base32chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-    let secret = '';
-    for (let i = 0; i < bytes.length; i++) {{
-        // Simple base32 encoding
-        secret += base32chars[bytes[i] % 32];
-    }}
-    // Pad to 32 chars
-    while (secret.length < 32) {{
-        const extra = new Uint8Array(1);
-        crypto.getRandomValues(extra);
-        secret += base32chars[extra[0] % 32];
-    }}
-    return secret;
-}}
-
-let totpSecret = null;
-
-document.getElementById('totp-toggle').addEventListener('change', function() {{
-    const section = document.getElementById('totp-section');
-    const hasTotp = document.getElementById('has-totp');
+document.getElementById('nonce-toggle').addEventListener('change', function() {{
+    const info = document.getElementById('nonce-info');
     if (this.checked) {{
-        section.classList.add('active');
-        if (!totpSecret) {{
-            totpSecret = generateSecret();
-        }}
-        hasTotp.value = '1';
-        updateQR();
+        info.classList.add('active');
     }} else {{
-        section.classList.remove('active');
-        hasTotp.value = '0';
+        info.classList.remove('active');
     }}
 }});
-
-document.getElementById('address').addEventListener('input', function() {{
-    if (totpSecret && document.getElementById('totp-toggle').checked) {{
-        updateQR();
-    }}
-}});
-
-function updateQR() {{
-    const address = document.getElementById('address').value || 'my-agent';
-    const otpUrl = 'otpauth://totp/sixel.email:' + encodeURIComponent(address) +
-                   '?secret=' + totpSecret + '&issuer=sixel.email';
-
-    document.getElementById('totp-secret-display').textContent = totpSecret;
-
-    // Generate QR code
-    const qrDiv = document.getElementById('qr-code');
-    qrDiv.innerHTML = '';
-    if (typeof qrcode !== 'undefined') {{
-        const qr = qrcode(0, 'M');
-        qr.addData(otpUrl);
-        qr.make();
-        qrDiv.innerHTML = qr.createSvgTag(4);
-    }}
-}}
-
-function copySecret() {{
-    if (totpSecret) {{
-        navigator.clipboard.writeText(totpSecret).then(function() {{
-            alert('Secret copied to clipboard');
-        }});
-    }}
-}}
 </script>
 </body></html>"""
 
@@ -298,7 +254,10 @@ async def create_agent(request: Request):
     form = await request.form()
     address = form["address"].lower().strip()
     allowed_contact = form["allowed_contact"].strip()
-    has_totp = form.get("has_totp", "0") == "1"
+    nonce_enabled = form.get("nonce_enabled", "") == "1"
+
+    if form.get("accept_terms", "") != "1":
+        raise HTTPException(status_code=400, detail="You must accept the terms to continue")
 
     # Validate address format
     import re
@@ -315,26 +274,32 @@ async def create_agent(request: Request):
     if count >= 10:
         raise HTTPException(status_code=400, detail="Maximum 10 agents per user")
 
-    # Create agent
+    # Create agent with 10,000 free credits
     try:
         agent = await pool.fetchrow(
             """
-            INSERT INTO agents (user_id, address, allowed_contact, credit_balance, has_totp)
-            VALUES ($1, $2, $3, 0, $4)
+            INSERT INTO agents (user_id, address, allowed_contact, credit_balance, nonce_enabled)
+            VALUES ($1, $2, $3, 10000, $4)
             RETURNING id
             """,
             user_id,
             address,
             allowed_contact,
-            has_totp,
+            nonce_enabled,
         )
     except Exception:
         raise HTTPException(status_code=400, detail="Address already taken")
 
     agent_id = agent["id"]
 
+    # Log the free credit grant
+    await pool.execute(
+        "INSERT INTO credit_transactions (agent_id, amount, reason) VALUES ($1, $2, $3)",
+        agent_id, 10000, "free_signup",
+    )
+
     # Sync agent→contact mapping to Cloudflare KV (for Email Worker)
-    await _sync_agent_to_kv(address, allowed_contact, has_totp)
+    await _sync_agent_to_kv(address, allowed_contact, nonce_enabled)
 
     # Generate API key
     key, key_hash, key_prefix = generate_api_key()
@@ -346,13 +311,13 @@ async def create_agent(request: Request):
     )
 
     # Build config snippet
-    totp_note = ""
-    if has_totp:
-        totp_note = (
-            "\\n\\nTOTP encryption is enabled for this agent.\\n"
-            "IMPORTANT: Use the reference client to read messages. Never call /v1/inbox directly.\\n"
-            "The reference client decrypts messages using your TOTP secret and only surfaces verified messages.\\n"
-            "Messages that fail decryption are discarded and an alert is sent to your contact."
+    nonce_note = ""
+    if nonce_enabled:
+        nonce_note = (
+            "\\n\\nDoor Knock verification is enabled. Your human must reply to the "
+            "email they receive (the reply-to address contains a single-use nonce). "
+            "To start a new conversation, they send to {address}@sixel.email and "
+            "reply to the auto-response."
         )
 
     config_snippet = (
@@ -361,18 +326,17 @@ async def create_agent(request: Request):
         f"Token: {key}\\n"
         f"Use POST /v1/send to email me. Use GET /v1/inbox to check for my reply.\\n"
         f"Poll /v1/inbox every 60 seconds while waiting."
-        f"{totp_note}"
+        f"{nonce_note}"
     )
 
-    totp_html = ""
-    if has_totp:
-        totp_html = """
-<div style="background: #fff3cd; border: 1px solid #ffc107; padding: 16px; margin: 16px 0;">
-    <strong>TOTP Encryption Enabled</strong><br>
-    <p>Your agent's messages will be encrypted. To send an encrypted email to your agent,
-    paste the current 6-digit code from your authenticator app at the top or bottom of your message.</p>
-    <p>Give the TOTP secret from the setup page to your agent (in its config file).
-    The agent's reference client will use it to decrypt messages.</p>
+    nonce_html = ""
+    if nonce_enabled:
+        nonce_html = """
+<div style="background: #f0f7ff; border: 1px solid #cce0ff; padding: 16px; margin: 16px 0;">
+    <strong>Door Knock Verification Enabled</strong><br>
+    <p>Every outbound email has a single-use nonce in the reply-to address.
+    Just reply normally &mdash; the nonce validates automatically.</p>
+    <p>You can toggle this on/off anytime from your dashboard.</p>
 </div>"""
 
     return HTMLResponse(f"""<!DOCTYPE html>
@@ -386,14 +350,14 @@ async def create_agent(request: Request):
 <body>
 <h1>sixel.email</h1>
 <h2>{address}@sixel.email</h2>
-{totp_html}
+<p>10,000 free messages. <a href="/donate">Donations welcome.</a></p>
+{nonce_html}
 <div style="background: #f0f0f0; padding: 16px; margin: 16px 0;">
     <strong>Your API key (shown once, save it now):</strong><br>
     <code>{key}</code><br><br>
     <strong>Paste this into your agent config:</strong><br>
     <pre>{config_snippet}</pre>
 </div>
-<a href="/topup?agent_id={agent_id}"><button>Add credit</button></a>
 <a href="/account"><button>Go to dashboard</button></a>
 </body></html>""")
 

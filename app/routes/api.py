@@ -63,7 +63,7 @@ async def send_message(req: SendRequest, agent_id: str = Depends(get_agent_id)):
     pool = await get_pool()
 
     agent = await pool.fetchrow(
-        "SELECT address, allowed_contact, credit_balance FROM agents WHERE id = $1",
+        "SELECT address, allowed_contact, credit_balance, nonce_enabled FROM agents WHERE id = $1",
         agent_id,
     )
     if not agent:
@@ -84,9 +84,12 @@ async def send_message(req: SendRequest, agent_id: str = Depends(get_agent_id)):
     footer = build_footer(agent["address"], new_balance)
     full_body = req.body + footer
 
-    # Generate nonce for reply-to validation
-    nonce = await generate_nonce(pool, agent_id)
-    reply_to = build_reply_to(agent["address"], nonce)
+    # Generate nonce for reply-to validation (only if nonce_enabled)
+    if agent["nonce_enabled"]:
+        nonce = await generate_nonce(pool, agent_id)
+        reply_to = build_reply_to(agent["address"], nonce)
+    else:
+        reply_to = f"{agent['address']}@{settings.mail_domain}"
 
     await send_email(
         from_address=from_addr,
@@ -137,7 +140,7 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
 
     # Check if agent was marked down, send recovery notification
     agent = await pool.fetchrow(
-        "SELECT address, allowed_contact, credit_balance, agent_down_notified FROM agents WHERE id = $1",
+        "SELECT address, allowed_contact, credit_balance, agent_down_notified, nonce_enabled FROM agents WHERE id = $1",
         agent_id,
     )
     if agent["agent_down_notified"]:
@@ -145,9 +148,11 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
             "UPDATE agents SET agent_down_notified = FALSE WHERE id = $1",
             agent_id,
         )
-        # System emails also get nonces (no credit deduction for the nonce itself)
-        recovery_nonce = await generate_nonce(pool, agent_id)
-        recovery_reply_to = build_reply_to(agent["address"], recovery_nonce)
+        if agent["nonce_enabled"]:
+            recovery_nonce = await generate_nonce(pool, agent_id)
+            recovery_reply_to = build_reply_to(agent["address"], recovery_nonce)
+        else:
+            recovery_reply_to = f"{agent['address']}@{settings.mail_domain}"
         await send_email(
             from_address=f"{agent['address']}@{settings.mail_domain}",
             to_address=agent["allowed_contact"],

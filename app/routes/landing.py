@@ -43,7 +43,7 @@ async def landing():
         font-size: 14px;
     }
     .cta:hover { background: #333; }
-    .price { color: #666; font-size: 14px; }
+    .free { color: #28a745; font-size: 14px; font-weight: bold; }
     .footer { margin-top: 48px; color: #999; font-size: 13px; }
     .footer a { color: #666; }
 </style>
@@ -60,7 +60,7 @@ If it stops responding, you get an email. The whole UI is your inbox.</p>
 <ol class="how-it-works">
     <li>Sign up. Pick an agent address.</li>
     <li>Set the one email it's allowed to talk to (yours).</li>
-    <li>Add $5 credit. Get an API key.</li>
+    <li>Get an API key. 10,000 free messages.</li>
     <li>Paste 5 lines into your agent config. Done.</li>
 </ol>
 
@@ -77,12 +77,56 @@ GET   /v1/inbox        Poll for new messages (also the heartbeat)
 GET   /v1/inbox/:id    Get a specific message
 POST  /v1/rotate-key   Rotate the API key</pre>
 
-<p class="price">$0.01 per message. Polling is free. No subscription.</p>
+<p class="free">Free. Polling is free. No subscription.
+<a href="/donate" style="color:#666;">Donations welcome.</a></p>
 
 <a href="/auth/github" class="cta">Sign up / Log in with GitHub</a>
 
 <div class="footer">
     <p><a href="/best-practices">Best practices</a> &mdash;
+    <a href="/donate">Donate</a> &mdash;
+    Built by <a href="https://github.com/sixel-et">sixel-et</a></p>
+</div>
+
+</body></html>"""
+
+
+@router.get("/donate", response_class=HTMLResponse)
+async def donate():
+    return """<!DOCTYPE html>
+<html><head>
+<title>sixel.email — donate</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+    body {
+        font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+        max-width: 640px;
+        margin: 60px auto;
+        padding: 0 20px;
+        line-height: 1.6;
+        color: #1a1a1a;
+        background: #fff;
+    }
+    h1 { font-size: 24px; margin-bottom: 4px; }
+    .tagline { color: #666; margin-bottom: 40px; }
+    .footer { margin-top: 48px; color: #999; font-size: 13px; }
+    .footer a { color: #666; }
+</style>
+</head>
+<body>
+
+<h1>sixel.email</h1>
+<p class="tagline">Donations welcome</p>
+
+<p>sixel.email is free to use. Donations help cover hosting and email delivery costs.</p>
+
+<p>If you find the service useful and want to help keep it running,
+reach out to <strong>support@sixel.email</strong>.</p>
+
+<p>A proper donation page is coming soon. For now, thank you for using the service.</p>
+
+<div class="footer">
+    <p><a href="/">Home</a> &mdash;
     Built by <a href="https://github.com/sixel-et">sixel-et</a></p>
 </div>
 

@@ -73,7 +73,7 @@ async def cf_inbound(request: Request):
     pool = await get_pool()
 
     agent = await pool.fetchrow(
-        "SELECT id, address, allowed_contact, credit_balance, channel_active "
+        "SELECT id, address, allowed_contact, credit_balance, channel_active, nonce_enabled "
         "FROM agents WHERE address = $1",
         agent_address,
     )
@@ -112,7 +112,29 @@ async def cf_inbound(request: Request):
         logger.info("Invalid allstop attempt for %s", agent_address)
         return {"status": "dropped", "reason": "invalid_nonce"}
 
-    # --- NONCE VALIDATION PATH ---
+    # --- NONCE DISABLED: accept directly from allowed contact ---
+    nonce_enabled = agent.get("nonce_enabled", False)
+    if not nonce_enabled:
+        # Accept email directly — no nonce check, no knock
+        new_balance = await deduct_credit(pool, agent_id, "message_received")
+        if new_balance is None:
+            logger.info("Dropped inbound for %s (no credits)", agent_address)
+            return {"status": "dropped", "reason": "insufficient_credits"}
+
+        await pool.execute(
+            """
+            INSERT INTO messages (agent_id, direction, subject, body, is_read, encrypted)
+            VALUES ($1, 'inbound', $2, $3, FALSE, $4)
+            """,
+            agent["id"],
+            subject,
+            message_body,
+            encrypted,
+        )
+        logger.info("Message received for %s (nonce disabled, direct accept)", agent_address)
+        return {"status": "received"}
+
+    # --- NONCE VALIDATION PATH (nonce_enabled=true) ---
     if nonce_str:
         validated_agent_id = await validate_nonce(pool, nonce_str)
         if validated_agent_id is None:
@@ -143,7 +165,7 @@ async def cf_inbound(request: Request):
         logger.info("Authenticated message received for %s (nonce valid)", agent_address)
         return {"status": "received"}
 
-    # --- KNOCK PATH (no nonce, from allowed contact) ---
+    # --- KNOCK PATH (no nonce, from allowed contact, nonce_enabled=true) ---
     if not _check_knock_rate(agent_id):
         logger.warning("Knock rate limited for %s", agent_address)
         return {"status": "dropped", "reason": "knock_rate_limited"}
