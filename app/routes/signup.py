@@ -267,12 +267,12 @@ async def create_agent(request: Request):
 
     pool = await get_pool()
 
-    # Check agent limit (10 per user)
+    # Check agent limit (5 per user)
     count = await pool.fetchval(
         "SELECT COUNT(*) FROM agents WHERE user_id = $1", user_id
     )
-    if count >= 10:
-        raise HTTPException(status_code=400, detail="Maximum 10 agents per user")
+    if count >= 5:
+        raise HTTPException(status_code=400, detail="Maximum 5 agents per account")
 
     # Create agent with 10,000 free credits
     try:
