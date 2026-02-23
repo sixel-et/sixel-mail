@@ -276,25 +276,28 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
             except Exception:
                 pass  # Heartbeat is best-effort; inbox delivery matters more
 
-        # Check if agent was marked down, send recovery notification
+        # Check if agent was marked down, send recovery notification.
+        # Atomic: only the machine that flips the flag sends the email.
         if agent["agent_down_notified"]:
-            await pool.execute(
-                "UPDATE agents SET agent_down_notified = FALSE, last_seen_at = now() WHERE id = $1",
+            cleared = await pool.fetchval(
+                "UPDATE agents SET agent_down_notified = FALSE, last_seen_at = now() "
+                "WHERE id = $1 AND agent_down_notified = TRUE RETURNING id",
                 agent_id,
             )
             _heartbeat_cache[agent_id] = now
-            if agent["nonce_enabled"]:
-                recovery_nonce = await generate_nonce(pool, agent_id)
-                recovery_reply_to = build_reply_to(agent["address"], recovery_nonce)
-            else:
-                recovery_reply_to = f"{agent['address']}@{settings.mail_domain}"
-            await send_email(
-                from_address=f"{agent['address']}@{settings.mail_domain}",
-                to_address=agent["allowed_contact"],
-                subject=f"[{agent['address']}] is back online",
-                body=f"Your agent {agent['address']}@{settings.mail_domain} is responding again.",
-                reply_to=recovery_reply_to,
-            )
+            if cleared:
+                if agent["nonce_enabled"]:
+                    recovery_nonce = await generate_nonce(pool, agent_id)
+                    recovery_reply_to = build_reply_to(agent["address"], recovery_nonce)
+                else:
+                    recovery_reply_to = f"{agent['address']}@{settings.mail_domain}"
+                await send_email(
+                    from_address=f"{agent['address']}@{settings.mail_domain}",
+                    to_address=agent["allowed_contact"],
+                    subject=f"[{agent['address']}] is back online",
+                    body=f"Your agent {agent['address']}@{settings.mail_domain} is responding again.",
+                    reply_to=recovery_reply_to,
+                )
 
     # Fetch unread inbound messages
     rows = await pool.fetch(
