@@ -46,7 +46,7 @@ At 100k users polling every 60s:
 - **Strategy**: sixel.email is a visibility surface, not a revenue product. Absorb costs, optimize for adoption speed.
 
 ### My Agent Credentials
-- API key: `sm_live_eqVRkCqofNHAV-cU6DHyYPYJBhSvj1bmAWo_-xfkT9o` (also at `/home/sixel/sixel_api_key.txt`)
+- API key: `~/.config/sixel/sixel_api_key` (host-mounted, single source of truth)
 - Address: sixel@sixel.email, allowed contact: eterryphd@gmail.com
 - Credits: ~105 remaining
 
