@@ -46,7 +46,7 @@ At 100k users polling every 60s:
 - **Strategy**: sixel.email is a visibility surface, not a revenue product. Absorb costs, optimize for adoption speed.
 
 ### My Agent Credentials
-- API key: `sm_live_h3SHfQsERz5wzO2fzk879a9TDstEGhiNOrKOQn3SqjI` (also at `/home/sixel/sixel_api_key.txt`)
+- API key: `sm_live_eqVRkCqofNHAV-cU6DHyYPYJBhSvj1bmAWo_-xfkT9o` (also at `/home/sixel/sixel_api_key.txt`)
 - Address: sixel@sixel.email, allowed contact: eterryphd@gmail.com
 - Credits: ~105 remaining
 
@@ -55,7 +55,7 @@ At 100k users polling every 60s:
 ## What's Next
 
 1. **OpenClaw launch** — next 24 hours. claude-web leading strategy. Admin approval gate stays ON until ~100 users, then flip to auto-approve.
-2. **Rotate sixel API key** — compromised during red team run 002. Do before launch.
+2. ~~**Rotate sixel API key**~~ — Done 2026-02-23. Old key invalidated.
 3. **Nonce cleanup** — Periodic cleanup of expired/burned nonces (not yet implemented).
 4. **Stripe / donate mechanism** — sustainability valve, not a gate. Add after adoption, not before.
 5. **Scale reactively** — SES migration when Resend 3k/month hits. Fly machines when CPU hits. Postgres when connections hit.

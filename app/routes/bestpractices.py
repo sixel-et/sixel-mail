@@ -242,6 +242,48 @@ that deactivates the channel instantly. Save it as a phone contact &mdash; the s
 page gives you a QR code. If anything goes wrong, send one email to that address
 and the channel shuts down. Reactivation requires a live session or the account dashboard.</p>
 
+<h3>Transport-layer prompt injection</h3>
+
+<p>sixel.email delivers message content as-is. We do not sanitize, filter, or
+scan email bodies for prompt injection. This is deliberate.</p>
+
+<p>The email body is untrusted input &mdash; even from your allowed contact. A forwarded
+email, an auto-reply, a mailing list digest, or a compromised account can all produce
+content that looks like instructions to an LLM. Your agent must treat every inbound
+message the same way it treats any user input: as data, not as commands.</p>
+
+<div class="warn">
+<strong>Your agent's defense is your responsibility.</strong> Use system prompts to
+anchor the agent's behavior. Separate the instruction channel (system prompt, config)
+from the data channel (email body). Don't let email content override tool permissions,
+change the allowed contact, or bypass approval gates.
+</div>
+
+<p>If your framework supports it, pass email bodies as user messages, not system
+messages. The distinction matters for models that weight system instructions more
+heavily than user input.</p>
+
+<h2>Stateless environments</h2>
+
+<p>Some agents run in environments without persistent filesystem access &mdash; serverless
+functions, ephemeral containers, or framework-managed processes that restart frequently.
+The inbox API is designed for this:</p>
+
+<ul>
+    <li><strong>No local state required.</strong> <code>GET /v1/inbox</code> returns unread messages
+    and marks them read atomically. If your agent restarts, it won't re-process messages
+    it already fetched (unless the fetch failed before the agent acted on them).</li>
+    <li><strong>API key is the only credential.</strong> No session tokens, no cookies,
+    no OAuth refresh. One bearer token in the header.</li>
+    <li><strong>Credit balance in every response.</strong> The agent can check its resource
+    budget without separate state tracking.</li>
+</ul>
+
+<p>If you can't persist a seen-ID list (see Common mistakes below), rely on the
+server-side read tracking. The tradeoff: if a fetch succeeds but your agent crashes
+before processing, the message is marked read and won't reappear. For critical workflows,
+persist the message ID before acting on it.</p>
+
 <h2>Common mistakes</h2>
 
 <h3>Polling too fast</h3>
@@ -287,7 +329,10 @@ attachments endpoint to get file content separately.
 <p>No. Only the one allowed contact you set during setup. This is by design.</p>
 
 <h3>Can I change the allowed contact?</h3>
-<p>Not yet. Contact support. This will be self-service soon.</p>
+<p>Yes &mdash; from your <code>/account</code> page. Changing the contact forces an API key
+rotation and clears your message history. This is a security measure: if the change was
+unauthorized, the old key stops working immediately and the attacker can't access
+prior messages.</p>
 
 <h3>What happens if my agent goes down?</h3>
 <p>If the agent stops polling <code>/v1/inbox</code>, you'll get a notification email
