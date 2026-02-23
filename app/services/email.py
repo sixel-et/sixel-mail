@@ -1,10 +1,28 @@
 import logging
+import time
 
 import httpx
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Global daily email cap — matches Resend free tier (100/day).
+# In-memory, resets when process restarts. Simple and effective.
+DAILY_EMAIL_LIMIT = 80  # Leave headroom below Resend's 100
+_daily_counter = {"count": 0, "reset_day": 0}
+
+
+def _check_daily_limit() -> bool:
+    """Returns True if under the daily limit. Resets at midnight UTC."""
+    today = int(time.time()) // 86400
+    if _daily_counter["reset_day"] != today:
+        _daily_counter["count"] = 0
+        _daily_counter["reset_day"] = today
+    if _daily_counter["count"] >= DAILY_EMAIL_LIMIT:
+        return False
+    _daily_counter["count"] += 1
+    return True
 
 
 async def send_email(
@@ -16,6 +34,11 @@ async def send_email(
     attachments: list[dict] | None = None,
 ):
     """Send an email via Resend."""
+    if not _check_daily_limit():
+        logger.warning("Daily email limit reached (%d), dropping: %s -> %s subj=%s",
+                        DAILY_EMAIL_LIMIT, from_address, to_address, subject)
+        return
+
     if not settings.resend_api_key:
         logger.info(
             "MOCK EMAIL: from=%s to=%s reply_to=%s subject=%s body=%s",
