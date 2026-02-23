@@ -9,10 +9,11 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Minimum timeout floor: must be larger than the heartbeat write interval
-# in api.py (HEARTBEAT_INTERVAL = 600s). This prevents the checker from
-# declaring agents dead between throttled writes.
-MIN_TIMEOUT_SECONDS = 1200  # 20 minutes
+# Minimum timeout floor: must be MORE than 2x the heartbeat write interval
+# in api.py (HEARTBEAT_INTERVAL = 600s). After recovery, the next regular
+# write is one full interval away, then the timeout counts from THAT write.
+# So minimum safe floor = 2 * interval + margin.
+MIN_TIMEOUT_SECONDS = 1800  # 30 minutes (2x600 + 600 margin)
 
 
 def _build_alert_footer(agent_id: str, agent_address: str, credits: int, status: str) -> str:
