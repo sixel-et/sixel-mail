@@ -251,43 +251,47 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
 
     pool = await get_pool()
 
-    # Throttled heartbeat: only write to DB if stale.
-    # Best-effort — never block message delivery if the write fails.
-    now = time.monotonic()
-    last_write = _heartbeat_cache.get(agent_id, 0)
-    if now - last_write >= HEARTBEAT_INTERVAL:
-        try:
+    # Fetch agent first — needed for heartbeat_enabled check and response
+    agent = await pool.fetchrow(
+        "SELECT address, allowed_contact, credit_balance, agent_down_notified, nonce_enabled, heartbeat_enabled FROM agents WHERE id = $1",
+        agent_id,
+    )
+
+    # Heartbeat + recovery only if monitoring is enabled
+    if agent and agent["heartbeat_enabled"]:
+        # Throttled heartbeat: only write to DB if stale.
+        # Best-effort — never block message delivery if the write fails.
+        now = time.monotonic()
+        last_write = _heartbeat_cache.get(agent_id, 0)
+        if now - last_write >= HEARTBEAT_INTERVAL:
+            try:
+                await pool.execute(
+                    "UPDATE agents SET last_seen_at = now() WHERE id = $1",
+                    agent_id,
+                )
+                _heartbeat_cache[agent_id] = now
+            except Exception:
+                pass  # Heartbeat is best-effort; inbox delivery matters more
+
+        # Check if agent was marked down, send recovery notification
+        if agent["agent_down_notified"]:
             await pool.execute(
-                "UPDATE agents SET last_seen_at = now() WHERE id = $1",
+                "UPDATE agents SET agent_down_notified = FALSE, last_seen_at = now() WHERE id = $1",
                 agent_id,
             )
             _heartbeat_cache[agent_id] = now
-        except Exception:
-            pass  # Heartbeat is best-effort; inbox delivery matters more
-
-    # Check if agent was marked down, send recovery notification
-    agent = await pool.fetchrow(
-        "SELECT address, allowed_contact, credit_balance, agent_down_notified, nonce_enabled FROM agents WHERE id = $1",
-        agent_id,
-    )
-    if agent["agent_down_notified"]:
-        await pool.execute(
-            "UPDATE agents SET agent_down_notified = FALSE, last_seen_at = now() WHERE id = $1",
-            agent_id,
-        )
-        _heartbeat_cache[agent_id] = now
-        if agent["nonce_enabled"]:
-            recovery_nonce = await generate_nonce(pool, agent_id)
-            recovery_reply_to = build_reply_to(agent["address"], recovery_nonce)
-        else:
-            recovery_reply_to = f"{agent['address']}@{settings.mail_domain}"
-        await send_email(
-            from_address=f"{agent['address']}@{settings.mail_domain}",
-            to_address=agent["allowed_contact"],
-            subject=f"[{agent['address']}] is back online",
-            body=f"Your agent {agent['address']}@{settings.mail_domain} is responding again.",
-            reply_to=recovery_reply_to,
-        )
+            if agent["nonce_enabled"]:
+                recovery_nonce = await generate_nonce(pool, agent_id)
+                recovery_reply_to = build_reply_to(agent["address"], recovery_nonce)
+            else:
+                recovery_reply_to = f"{agent['address']}@{settings.mail_domain}"
+            await send_email(
+                from_address=f"{agent['address']}@{settings.mail_domain}",
+                to_address=agent["allowed_contact"],
+                subject=f"[{agent['address']}] is back online",
+                body=f"Your agent {agent['address']}@{settings.mail_domain} is responding again.",
+                reply_to=recovery_reply_to,
+            )
 
     # Fetch unread inbound messages
     rows = await pool.fetch(

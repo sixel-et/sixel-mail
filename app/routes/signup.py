@@ -197,6 +197,14 @@ async def setup_page(request: Request):
     <input type="email" name="allowed_contact" required><br><br>
 
     <label class="toggle-label">
+        <input type="checkbox" id="heartbeat-toggle" name="heartbeat_enabled" value="1" checked>
+        Enable heartbeat monitoring
+    </label>
+    <p class="note">Sends you a notification if your agent stops polling.
+    Disable this for agents that send occasional emails without a polling loop.</p>
+    <br>
+
+    <label class="toggle-label">
         <input type="checkbox" id="nonce-toggle" name="nonce_enabled" value="1">
         Enable Door Knock verification
     </label>
@@ -256,6 +264,7 @@ async def create_agent(request: Request):
     address = form["address"].lower().strip()
     allowed_contact = form["allowed_contact"].strip()
     nonce_enabled = form.get("nonce_enabled", "") == "1"
+    heartbeat_enabled = form.get("heartbeat_enabled", "") == "1"
 
     if form.get("accept_terms", "") != "1":
         raise HTTPException(status_code=400, detail="You must accept the terms to continue")
@@ -279,14 +288,15 @@ async def create_agent(request: Request):
     try:
         agent = await pool.fetchrow(
             """
-            INSERT INTO agents (user_id, address, allowed_contact, credit_balance, nonce_enabled)
-            VALUES ($1, $2, $3, 10000, $4)
+            INSERT INTO agents (user_id, address, allowed_contact, credit_balance, nonce_enabled, heartbeat_enabled)
+            VALUES ($1, $2, $3, 10000, $4, $5)
             RETURNING id
             """,
             user_id,
             address,
             allowed_contact,
             nonce_enabled,
+            heartbeat_enabled,
         )
     except Exception:
         raise HTTPException(status_code=400, detail="Address already taken")

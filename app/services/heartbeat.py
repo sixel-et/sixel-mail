@@ -43,6 +43,7 @@ async def heartbeat_loop():
                        last_seen_at, user_id, nonce_enabled
                 FROM agents
                 WHERE alert_status = 'active'
+                  AND heartbeat_enabled = TRUE
                   AND last_seen_at IS NOT NULL
                   AND last_seen_at < now() - (heartbeat_timeout * interval '1 second')
                   AND agent_down_notified = FALSE

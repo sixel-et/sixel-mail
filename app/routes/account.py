@@ -9,6 +9,7 @@ from app.auth import generate_api_key
 from app.config import settings
 from app.db import get_pool
 from app.routes.signup import _sync_agent_to_kv, get_user_id
+from app.services.email import send_email
 
 router = APIRouter()
 
@@ -83,6 +84,21 @@ async def account_page(request: Request):
             amount_dollars = txn["amount"] / 100
             txn_lines += f"  {date_str} — ${amount_dollars:.2f} ({txn['amount']} messages) — {esc(txn['reason'])}<br>\n"
 
+        heartbeat_enabled = agent.get("heartbeat_enabled", True)
+        heartbeat_badge = ' <span style="background:#17a2b8;color:#fff;padding:2px 6px;font-size:12px;">HEARTBEAT OFF</span>' if not heartbeat_enabled else ""
+
+        heartbeat_button = (
+            f'<form method="POST" action="/account/disable-heartbeat" style="display:inline">'
+            f'<input type="hidden" name="agent_id" value="{agent_id}">'
+            f'<button type="submit" onclick="return confirm(\'Disable heartbeat monitoring? '
+            f'You will not be notified if this agent stops responding.\')">Disable Heartbeat</button></form>'
+            if heartbeat_enabled else
+            f'<form method="POST" action="/account/enable-heartbeat" style="display:inline">'
+            f'<input type="hidden" name="agent_id" value="{agent_id}">'
+            f'<button type="submit" onclick="return confirm(\'Enable heartbeat monitoring? '
+            f'You will be notified if this agent stops polling.\')">Enable Heartbeat</button></form>'
+        )
+
         nonce_button = (
             f'<form method="POST" action="/account/disable-nonce" style="display:inline">'
             f'<input type="hidden" name="agent_id" value="{agent_id}">'
@@ -115,7 +131,7 @@ async def account_page(request: Request):
 
         agent_sections += f"""
 <div style="border: 1px solid #ccc; padding: 16px; margin: 16px 0;">
-    <h3>{address}@sixel.email{nonce_badge}{killswitch_badge}{allstop_badge}{pending_badge}</h3>
+    <h3>{address}@sixel.email{nonce_badge}{heartbeat_badge}{killswitch_badge}{allstop_badge}{pending_badge}</h3>
     <p>Status: {status} (last seen: {last_seen_str})</p>
     <p>Allowed contact: {esc(agent['allowed_contact'])}</p>
     <p>Credits: {agent['credit_balance']} messages</p>
@@ -123,12 +139,20 @@ async def account_page(request: Request):
     <p><strong>Recent messages:</strong></p>
     <div style="font-size: 14px;">{msg_lines if msg_lines else "    No messages yet"}</div>
     <br>
+    <form method="POST" action="/account/update-contact" style="margin: 12px 0;">
+        <input type="hidden" name="agent_id" value="{agent_id}">
+        <label>Change allowed contact:</label><br>
+        <input type="email" name="new_contact" placeholder="new-email@example.com"
+            style="font-family:monospace;font-size:14px;padding:6px;width:300px;margin:4px 0;">
+        <button type="submit" onclick="return confirm('This will:\\n- Change your allowed contact\\n- Clear all message history\\n- Rotate your API key (old key stops working)\\n\\nYou will need to update your agent config with the new key.\\n\\nContinue?')">Update Contact</button>
+    </form>
     <a href="/topup?agent_id={agent_id}"><button>Add credit</button></a>
     <form method="POST" action="/account/rotate-key" style="display:inline">
         <input type="hidden" name="agent_id" value="{agent_id}">
         <button type="submit" onclick="return confirm('Generate a new API key? The old key will stop working immediately.')">Rotate API key</button>
     </form>
     {nonce_button}
+    {heartbeat_button}
     {allstop_button}
 </div>
 """
@@ -200,6 +224,105 @@ async def rotate_key(request: Request):
     <code>{key}</code>
 </div>
 <p>The old key has been revoked.</p>
+<a href="/account"><button>Back to dashboard</button></a>
+</body></html>"""
+
+
+@router.post("/account/enable-heartbeat")
+async def enable_heartbeat(request: Request):
+    pool, agent, user_id = await _get_verified_agent(request)
+    await pool.execute(
+        "UPDATE agents SET heartbeat_enabled = TRUE WHERE id = $1", agent["id"]
+    )
+    return RedirectResponse("/account", status_code=303)
+
+
+@router.post("/account/disable-heartbeat")
+async def disable_heartbeat(request: Request):
+    pool, agent, user_id = await _get_verified_agent(request)
+    await pool.execute(
+        "UPDATE agents SET heartbeat_enabled = FALSE WHERE id = $1", agent["id"]
+    )
+    return RedirectResponse("/account", status_code=303)
+
+
+@router.post("/account/update-contact", response_class=HTMLResponse)
+async def update_contact(request: Request):
+    form = await request.form()
+    pool, agent, user_id = await _get_verified_agent(request, form)
+    new_contact = form.get("new_contact", "").strip()
+    agent_id = str(agent["id"])
+    address = agent["address"]
+
+    if not new_contact or "@" not in new_contact:
+        raise HTTPException(status_code=400, detail="Invalid email address")
+
+    old_contact = agent["allowed_contact"]
+    if new_contact.lower() == old_contact.lower():
+        raise HTTPException(status_code=400, detail="New contact is the same as the current one")
+
+    # 1. Delete all messages for this agent
+    await pool.execute("DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE agent_id = $1)", agent["id"])
+    await pool.execute("DELETE FROM messages WHERE agent_id = $1", agent["id"])
+
+    # 2. Delete old API keys, generate new one
+    await pool.execute("DELETE FROM api_keys WHERE agent_id = $1", agent["id"])
+    key, key_hash, key_prefix = generate_api_key()
+    await pool.execute(
+        "INSERT INTO api_keys (agent_id, key_hash, key_prefix) VALUES ($1, $2, $3)",
+        agent["id"], key_hash, key_prefix,
+    )
+
+    # 3. Update allowed_contact
+    await pool.execute(
+        "UPDATE agents SET allowed_contact = $1 WHERE id = $2",
+        new_contact, agent["id"],
+    )
+
+    # 4. Burn existing nonces (they were for the old contact)
+    await pool.execute("DELETE FROM nonces WHERE agent_id = $1", agent["id"])
+
+    # 5. Sync to Cloudflare KV
+    await _sync_agent_to_kv(
+        address, new_contact,
+        agent.get("nonce_enabled", False),
+        admin_approved=agent.get("admin_approved", False),
+    )
+
+    # 6. Notify old contact
+    try:
+        await send_email(
+            from_address=f"{address}@{settings.mail_domain}",
+            to_address=old_contact,
+            subject=f"[{address}] allowed contact changed",
+            body=(
+                f"The allowed contact for {address}@{settings.mail_domain} has been changed.\n\n"
+                f"If you did not make this change, the account may be compromised. "
+                f"Log in at {settings.api_base_url}/account to review."
+            ),
+            reply_to=f"{address}@{settings.mail_domain}",
+        )
+    except Exception:
+        pass  # Best-effort notification
+
+    return f"""<!DOCTYPE html>
+<html><head><title>Sixel-Mail - Contact Updated</title>
+<style>
+    body {{ font-family: monospace; max-width: 600px; margin: 40px auto; padding: 0 20px; }}
+    button {{ font-family: monospace; font-size: 14px; cursor: pointer; background: #000; color: #fff; border: none; padding: 8px 16px; margin: 4px; }}
+    code {{ background: #f0f0f0; padding: 2px 6px; }}
+</style></head>
+<body>
+<h1>sixel.email</h1>
+<h2>{html.escape(address)}@sixel.email — contact updated</h2>
+<p>Allowed contact changed to: <strong>{html.escape(new_contact)}</strong></p>
+<p>All message history has been cleared.</p>
+<div style="background: #fff3cd; border: 1px solid #ffc107; padding: 16px; margin: 16px 0;">
+    <strong>Your new API key (shown once, save it now):</strong><br><br>
+    <code>{key}</code><br><br>
+    The old key has been revoked. Update your agent config with this key.
+</div>
+<p>A notification has been sent to the previous contact.</p>
 <a href="/account"><button>Back to dashboard</button></a>
 </body></html>"""
 
