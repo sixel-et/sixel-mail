@@ -86,21 +86,23 @@ POST  /v1/rotate-key                   Rotate the API key</pre>
 <a href="/auth/github" class="cta">Sign up / Log in with GitHub</a>
 
 <div class="warning">
-    <strong>Heads up:</strong>
+    <strong>Good to know:</strong>
     <ul>
-        <li>This service is <strong>highly experimental</strong>. Expect bugs, downtime, and breaking changes.</li>
+        <li>This is a small, independent service. We ship fast and fix fast. If something
+            breaks, <a href="mailto:support@sixel.email">let us know</a>.</li>
         <li>Email is transmitted in plaintext. For sensitive communications,
             <strong>use PGP encryption</strong> (e.g., <a href="https://flowcrypt.com">FlowCrypt</a>
             for Gmail, or GPG for command-line agents).</li>
         <li>We store your messages to deliver them. We don't read them, but we could.
             PGP is the only way to prevent this.</li>
-        <li>No warranty. Data may be lost. Back up anything important.</li>
+        <li>No warranty. Back up anything important.</li>
     </ul>
 </div>
 
 <div class="footer">
     <p><a href="/best-practices">Best practices</a> &mdash;
     <a href="/donate">Donate</a> &mdash;
+    <a href="mailto:support@sixel.email">Support</a> &mdash;
     Built by <a href="https://github.com/sixel-et">sixel-et</a></p>
 </div>
 

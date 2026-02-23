@@ -125,6 +125,23 @@ Two mitigations:</p>
     already arrived while you were down. Handle it before doing anything else.</li>
 </ol>
 
+<h3>When the operator goes dark</h3>
+
+<p>Your agent emails the operator. No reply for hours. What should it do?</p>
+
+<p>Don't assume the operator saw the message. Don't send follow-ups. The agent should
+have a fallback mode: continue with non-destructive work it can do without approval,
+or gracefully idle (poll the inbox, do nothing else). The worst outcome is an agent
+that escalates its own urgency &mdash; sending repeated messages, making assumptions,
+or taking actions it was waiting for approval on.</p>
+
+<div class="tip">
+<strong>Design for silence.</strong> If you give your agent tasks that require approval
+at certain gates, also give it a list of things it <em>can</em> do without approval.
+When the operator doesn't respond, the agent works that list instead of stalling or
+improvising.
+</div>
+
 <h2>Attachments</h2>
 
 <h3>Sending attachments</h3>
@@ -158,16 +175,18 @@ Returns raw bytes with the correct <code>Content-Type</code> header.</p>
 <p>If you run multiple agent sessions (different projects, different specializations),
 they can share a single inbox and coordinate responses without a central orchestrator.</p>
 
-<h3>Sixel Teams</h3>
+<h3>Sixel Teams (reference architecture)</h3>
 
-<p>We published a reference implementation:
+<p>We published a reference architecture:
 <a href="https://github.com/sixel-et/sixel-teams">sixel-et/sixel-teams</a>.
-It's a hubless architecture &mdash; a lightweight bash watcher handles email I/O,
-wakes sessions via tmux injection, collects contributions, and sends one assembled
-reply. No framework, no shared context window, no LLM calls in the coordination layer.</p>
+The core pattern is hubless coordination &mdash; a lightweight watcher handles email I/O,
+wakes sessions, collects contributions, and sends one assembled reply. No framework,
+no shared context window, no LLM calls in the coordination layer.</p>
 
-<p>The repo includes watcher scripts, watchdog, peer-to-peer messaging between sessions,
-and documentation for the full pattern. Start there.</p>
+<p>The reference implementation uses tmux and bash scripts. The <em>architecture</em> is
+harness-agnostic &mdash; the same watcher/contributor/assembler pattern works whether your
+agent sessions are tmux panes, Docker containers, or framework-managed processes.
+Adapt the coordination layer to your stack; the email integration stays the same.</p>
 
 <h2>Security</h2>
 
@@ -281,8 +300,10 @@ API key and coordinate responses (see Multi-session coordination above).</p>
 
 <h3>Is polling really free?</h3>
 <p>Yes. <code>GET /v1/inbox</code> is free. You only pay credits per message sent or
-received. Every account starts with 10,000 free credits. Polling once per minute
-for a month is zero cost.</p>
+received (1 credit each). Every account starts with 10,000 free credits &mdash; that's
+5,000 round-trip conversations. An agent that exchanges 20 messages a day with its
+operator uses about 600 credits a month. For most use cases, 10,000 credits
+lasts months.</p>
 
 <h3>Can agents send and receive attachments?</h3>
 <p>Yes. Up to 10 files per message, 10MB total. Send with base64-encoded content
@@ -298,6 +319,24 @@ account compromise, you probably don't need it.</p>
 <h3>What if I email the agent from the wrong address?</h3>
 <p>Rejected at the edge. No credit deduction, no storage, no notification to
 the agent. It's as if the email was never sent.</p>
+
+<h3>How is this different from just using Gmail?</h3>
+<p>Gmail doesn't give your agent an API. You'd need to set up OAuth, parse MIME yourself,
+build a polling loop around IMAP, and handle authentication refresh. sixel.email is
+5 lines of config: one endpoint to send, one to receive, one API key. The inbox poll
+doubles as a heartbeat &mdash; if your agent stops checking, you get notified. And the
+one-allowed-contact model means your agent can't be tricked into emailing anyone else.</p>
+
+<h3>How is this different from other agent email services?</h3>
+<p>Most agent email services give you a general-purpose email API. sixel.email is
+opinionated: one agent, one contact, prepaid credits, no subscription. The leash
+(one allowed contact) is the product, not a limitation. If you need an agent that
+emails arbitrary recipients, this isn't the right tool. If you want a controlled
+channel between your agent and you, it is.</p>
+
+<h2>Support</h2>
+<p>Questions, bugs, feedback: <strong><a href="mailto:support@sixel.email">support@sixel.email</a></strong>.
+That's a real inbox monitored by a human.</p>
 
 <div class="footer">
     <p><a href="/">sixel.email</a> &mdash;
