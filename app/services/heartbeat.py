@@ -36,65 +36,18 @@ async def heartbeat_loop():
         try:
             pool = await get_pool()
 
-            # Find agents that have gone silent
-            overdue = await pool.fetch(
-                """
-                SELECT id, address, allowed_contact, credit_balance,
-                       last_seen_at, user_id, nonce_enabled
-                FROM agents
-                WHERE alert_status = 'active'
-                  AND heartbeat_enabled = TRUE
-                  AND last_seen_at IS NOT NULL
-                  AND last_seen_at < now() - (heartbeat_timeout * interval '1 second')
-                  AND agent_down_notified = FALSE
-                  AND (alert_mute_until IS NULL OR alert_mute_until < now())
-                """
-            )
+            # Advisory lock: only one Fly machine runs the check at a time.
+            # pg_try_advisory_lock returns immediately (no blocking).
+            # Lock ID 8675309 is arbitrary but fixed.
+            got_lock = await pool.fetchval("SELECT pg_try_advisory_lock(8675309)")
+            if not got_lock:
+                await asyncio.sleep(60)
+                continue
 
-            for agent in overdue:
-                agent_id = str(agent["id"])
-                address = agent["address"]
-                contact = agent["allowed_contact"]
-                credits = agent["credit_balance"]
-                last_seen = agent["last_seen_at"].strftime("%I:%M%p %Z")
-
-                footer = _build_alert_footer(
-                    agent_id, address, credits, f"OFFLINE (last seen: {last_seen})"
-                )
-
-                # Generate nonce for alert reply-to (only if nonce_enabled)
-                if agent.get("nonce_enabled", False):
-                    alert_nonce = await generate_nonce(pool, agent_id)
-                    alert_reply_to = build_reply_to(address, alert_nonce)
-                else:
-                    alert_reply_to = f"{address}@{settings.mail_domain}"
-
-                await send_email(
-                    from_address=f"{address}@{settings.mail_domain}",
-                    to_address=contact,
-                    subject=f"[{address}] stopped responding",
-                    body=(
-                        f"Your agent {address}@{settings.mail_domain} hasn't checked in since "
-                        f"{last_seen}."
-                        f"{footer}"
-                    ),
-                    reply_to=alert_reply_to,
-                )
-
-                await pool.execute(
-                    "UPDATE agents SET agent_down_notified = TRUE WHERE id = $1",
-                    agent["id"],
-                )
-                logger.info("Sent agent-down alert for %s", address)
-
-            # Un-mute expired mutes
-            await pool.execute(
-                """
-                UPDATE agents
-                SET alert_status = 'active', alert_mute_until = NULL
-                WHERE alert_mute_until IS NOT NULL AND alert_mute_until < now()
-                """
-            )
+            try:
+                await _run_heartbeat_check(pool)
+            finally:
+                await pool.execute("SELECT pg_advisory_unlock(8675309)")
 
         except asyncio.CancelledError:
             logger.info("Heartbeat checker stopped")
@@ -103,3 +56,66 @@ async def heartbeat_loop():
             logger.exception("Heartbeat checker error")
 
         await asyncio.sleep(60)
+
+
+async def _run_heartbeat_check(pool):
+    """Core heartbeat check logic. Caller holds advisory lock."""
+    # Find agents that have gone silent
+    overdue = await pool.fetch(
+        """
+        SELECT id, address, allowed_contact, credit_balance,
+               last_seen_at, user_id, nonce_enabled
+        FROM agents
+        WHERE alert_status = 'active'
+          AND heartbeat_enabled = TRUE
+          AND last_seen_at IS NOT NULL
+          AND last_seen_at < now() - (heartbeat_timeout * interval '1 second')
+          AND agent_down_notified = FALSE
+          AND (alert_mute_until IS NULL OR alert_mute_until < now())
+        """
+    )
+
+    for agent in overdue:
+        agent_id = str(agent["id"])
+        address = agent["address"]
+        contact = agent["allowed_contact"]
+        credits = agent["credit_balance"]
+        last_seen = agent["last_seen_at"].strftime("%I:%M%p %Z")
+
+        footer = _build_alert_footer(
+            agent_id, address, credits, f"OFFLINE (last seen: {last_seen})"
+        )
+
+        # Generate nonce for alert reply-to (only if nonce_enabled)
+        if agent.get("nonce_enabled", False):
+            alert_nonce = await generate_nonce(pool, agent_id)
+            alert_reply_to = build_reply_to(address, alert_nonce)
+        else:
+            alert_reply_to = f"{address}@{settings.mail_domain}"
+
+        await send_email(
+            from_address=f"{address}@{settings.mail_domain}",
+            to_address=contact,
+            subject=f"[{address}] stopped responding",
+            body=(
+                f"Your agent {address}@{settings.mail_domain} hasn't checked in since "
+                f"{last_seen}."
+                f"{footer}"
+            ),
+            reply_to=alert_reply_to,
+        )
+
+        await pool.execute(
+            "UPDATE agents SET agent_down_notified = TRUE WHERE id = $1",
+            agent["id"],
+        )
+        logger.info("Sent agent-down alert for %s", address)
+
+    # Un-mute expired mutes
+    await pool.execute(
+        """
+        UPDATE agents
+        SET alert_status = 'active', alert_mute_until = NULL
+        WHERE alert_mute_until IS NOT NULL AND alert_mute_until < now()
+        """
+    )
