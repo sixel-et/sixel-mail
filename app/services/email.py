@@ -70,6 +70,9 @@ async def send_email(
             },
             json=payload,
         )
+        if resp.status_code == 429:
+            logger.warning("Resend rate limited: %s", resp.text)
+            raise Exception("Email send rate limited by Resend")
         if resp.status_code != 200:
             logger.error("Resend API error: %s %s", resp.status_code, resp.text)
             raise Exception(f"Email send failed: {resp.status_code}")

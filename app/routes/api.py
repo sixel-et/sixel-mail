@@ -379,28 +379,40 @@ async def download_attachment(
     pool = await get_pool()
 
     # Verify message belongs to agent
-    msg = await pool.fetchrow(
-        "SELECT id FROM messages WHERE id = $1 AND agent_id = $2",
-        message_id,
-        agent_id,
-    )
+    try:
+        msg = await pool.fetchrow(
+            "SELECT id FROM messages WHERE id = $1::uuid AND agent_id = $2",
+            message_id,
+            agent_id,
+        )
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid message ID")
     if not msg:
         raise HTTPException(status_code=404, detail="Message not found")
 
     # Fetch attachment
-    att = await pool.fetchrow(
-        "SELECT filename, mime_type, content_base64 FROM attachments WHERE id = $1 AND message_id = $2",
-        attachment_id,
-        message_id,
-    )
+    try:
+        att = await pool.fetchrow(
+            "SELECT filename, mime_type, content_base64 FROM attachments WHERE id = $1::uuid AND message_id = $2::uuid",
+            attachment_id,
+            message_id,
+        )
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid attachment ID")
     if not att:
         raise HTTPException(status_code=404, detail="Attachment not found")
 
-    content = base64.b64decode(att["content_base64"])
+    try:
+        content = base64.b64decode(att["content_base64"])
+    except Exception:
+        raise HTTPException(status_code=500, detail="Attachment content corrupted")
+
+    # Sanitize filename for Content-Disposition header
+    safe_filename = att["filename"].replace('"', '\\"').replace('\n', '').replace('\r', '')
     return Response(
         content=content,
         media_type=att["mime_type"],
-        headers={"Content-Disposition": f'attachment; filename="{att["filename"]}"'},
+        headers={"Content-Disposition": f'attachment; filename="{safe_filename}"'},
     )
 
 
