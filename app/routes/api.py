@@ -251,15 +251,19 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
 
     pool = await get_pool()
 
-    # Throttled heartbeat: only write to DB if stale
+    # Throttled heartbeat: only write to DB if stale.
+    # Best-effort — never block message delivery if the write fails.
     now = time.monotonic()
     last_write = _heartbeat_cache.get(agent_id, 0)
     if now - last_write >= HEARTBEAT_INTERVAL:
-        await pool.execute(
-            "UPDATE agents SET last_seen_at = now() WHERE id = $1",
-            agent_id,
-        )
-        _heartbeat_cache[agent_id] = now
+        try:
+            await pool.execute(
+                "UPDATE agents SET last_seen_at = now() WHERE id = $1",
+                agent_id,
+            )
+            _heartbeat_cache[agent_id] = now
+        except Exception:
+            pass  # Heartbeat is best-effort; inbox delivery matters more
 
     # Check if agent was marked down, send recovery notification
     agent = await pool.fetchrow(
