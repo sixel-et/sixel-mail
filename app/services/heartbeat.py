@@ -9,11 +9,11 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Minimum timeout floor: must be MORE than 2x the heartbeat write interval
-# in api.py (HEARTBEAT_INTERVAL = 600s). After recovery, the next regular
-# write is one full interval away, then the timeout counts from THAT write.
-# So minimum safe floor = 2 * interval + margin.
-MIN_TIMEOUT_SECONDS = 1800  # 30 minutes (2x600 + 600 margin)
+# Tracks last_seen_at from the previous check cycle per agent.
+# Only trigger "agent down" if the timestamp hasn't changed between
+# two consecutive checks AND exceeds the timeout. This eliminates
+# beat-frequency false positives from throttled heartbeat writes.
+_previous_seen: dict[str, object] = {}  # {agent_id: last_seen_at}
 
 
 def _build_alert_footer(agent_id: str, agent_address: str, credits: int, status: str) -> str:
@@ -43,8 +43,7 @@ async def heartbeat_loop():
             pool = await get_pool()
 
             # Use a single connection for advisory lock to ensure lock/unlock
-            # happen on the same Postgres session. Connection pool otherwise
-            # routes lock and unlock to different connections, breaking the lock.
+            # happen on the same Postgres session.
             async with pool.acquire() as conn:
                 got_lock = await conn.fetchval("SELECT pg_try_advisory_lock(8675309)")
                 if not got_lock:
@@ -66,36 +65,54 @@ async def heartbeat_loop():
 
 
 async def _run_heartbeat_check(conn):
-    """Core heartbeat check logic. Caller holds advisory lock on conn."""
-    # Find agents that have gone silent.
-    # Uses GREATEST to enforce a minimum timeout floor regardless of what's
-    # stored in the DB column. Prevents false positives from timeout < write interval.
-    overdue = await conn.fetch(
-        f"""
+    """Core heartbeat check logic. Caller holds advisory lock on conn.
+
+    Two conditions must BOTH be true to declare an agent down:
+    1. last_seen_at exceeds heartbeat_timeout (the timestamp is stale)
+    2. last_seen_at hasn't changed since the previous check cycle
+
+    Condition 2 eliminates beat-frequency false positives: if the agent
+    is polling and heartbeat writes are just throttled, last_seen_at will
+    change between checks even if it looks "old" at any single point.
+    """
+    # Get candidates: stale last_seen_at, not already notified
+    candidates = await conn.fetch(
+        """
         SELECT id, address, allowed_contact, credit_balance,
-               last_seen_at, user_id, nonce_enabled
+               last_seen_at, user_id, nonce_enabled, heartbeat_timeout
         FROM agents
         WHERE alert_status = 'active'
           AND heartbeat_enabled = TRUE
           AND last_seen_at IS NOT NULL
-          AND last_seen_at < now() - (GREATEST(heartbeat_timeout, {MIN_TIMEOUT_SECONDS}) * interval '1 second')
+          AND last_seen_at < now() - (heartbeat_timeout * interval '1 second')
           AND agent_down_notified = FALSE
           AND (alert_mute_until IS NULL OR alert_mute_until < now())
         """
     )
 
-    for agent in overdue:
+    for agent in candidates:
         agent_id = str(agent["id"])
+        current_seen = agent["last_seen_at"]
+        previous_seen = _previous_seen.get(agent_id)
+
+        # Update our memory of this agent's last_seen_at for next cycle
+        _previous_seen[agent_id] = current_seen
+
+        # Only trigger if last_seen_at hasn't changed since last check.
+        # If it changed, the agent is alive — writes are just throttled.
+        if previous_seen is None or current_seen != previous_seen:
+            continue
+
+        # Both conditions met: stale AND unchanged. Agent is truly down.
         address = agent["address"]
         contact = agent["allowed_contact"]
         credits = agent["credit_balance"]
-        last_seen = agent["last_seen_at"].strftime("%I:%M%p %Z")
+        last_seen = current_seen.strftime("%I:%M%p %Z")
 
         footer = _build_alert_footer(
             agent_id, address, credits, f"OFFLINE (last seen: {last_seen})"
         )
 
-        # Generate nonce for alert reply-to (only if nonce_enabled)
         if agent.get("nonce_enabled", False):
             alert_nonce = await generate_nonce(conn, agent_id)
             alert_reply_to = build_reply_to(address, alert_nonce)
@@ -119,6 +136,17 @@ async def _run_heartbeat_check(conn):
             agent["id"],
         )
         logger.info("Sent agent-down alert for %s", address)
+
+    # Also track agents that are NOT candidates (alive) — update their
+    # _previous_seen so we have fresh baselines.
+    alive = await conn.fetch(
+        """
+        SELECT id, last_seen_at FROM agents
+        WHERE heartbeat_enabled = TRUE AND last_seen_at IS NOT NULL
+        """
+    )
+    for agent in alive:
+        _previous_seen[str(agent["id"])] = agent["last_seen_at"]
 
     # Un-mute expired mutes
     await conn.execute(
