@@ -12,8 +12,14 @@ from app.services.credits import deduct_credit
 from app.services.email import build_footer, send_email
 from app.services.nonce import build_reply_to, generate_nonce
 
+import time
+
 router = APIRouter(prefix="/v1")
 
+# Heartbeat throttle: only write last_seen_at to DB every N seconds.
+# Reduces Supabase writes from 1/poll to 1/interval per agent.
+HEARTBEAT_INTERVAL = 600  # 10 minutes
+_heartbeat_cache: dict[str, float] = {}
 
 MAX_BODY_LENGTH = 100_000  # 100KB
 MAX_ATTACHMENT_TOTAL = 10_000_000  # 10MB decoded
@@ -245,14 +251,15 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
 
     pool = await get_pool()
 
-    # Update heartbeat
-    await pool.execute(
-        """
-        UPDATE agents SET last_seen_at = now()
-        WHERE id = $1
-        """,
-        agent_id,
-    )
+    # Throttled heartbeat: only write to DB if stale
+    now = time.monotonic()
+    last_write = _heartbeat_cache.get(agent_id, 0)
+    if now - last_write >= HEARTBEAT_INTERVAL:
+        await pool.execute(
+            "UPDATE agents SET last_seen_at = now() WHERE id = $1",
+            agent_id,
+        )
+        _heartbeat_cache[agent_id] = now
 
     # Check if agent was marked down, send recovery notification
     agent = await pool.fetchrow(
@@ -261,9 +268,10 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
     )
     if agent["agent_down_notified"]:
         await pool.execute(
-            "UPDATE agents SET agent_down_notified = FALSE WHERE id = $1",
+            "UPDATE agents SET agent_down_notified = FALSE, last_seen_at = now() WHERE id = $1",
             agent_id,
         )
+        _heartbeat_cache[agent_id] = now
         if agent["nonce_enabled"]:
             recovery_nonce = await generate_nonce(pool, agent_id)
             recovery_reply_to = build_reply_to(agent["address"], recovery_nonce)
