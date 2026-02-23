@@ -9,6 +9,11 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Minimum timeout floor: must be larger than the heartbeat write interval
+# in api.py (HEARTBEAT_INTERVAL = 600s). This prevents the checker from
+# declaring agents dead between throttled writes.
+MIN_TIMEOUT_SECONDS = 1200  # 20 minutes
+
 
 def _build_alert_footer(agent_id: str, agent_address: str, credits: int, status: str) -> str:
     on_url = sign_alert_url(agent_id, "on")
@@ -36,18 +41,19 @@ async def heartbeat_loop():
         try:
             pool = await get_pool()
 
-            # Advisory lock: only one Fly machine runs the check at a time.
-            # pg_try_advisory_lock returns immediately (no blocking).
-            # Lock ID 8675309 is arbitrary but fixed.
-            got_lock = await pool.fetchval("SELECT pg_try_advisory_lock(8675309)")
-            if not got_lock:
-                await asyncio.sleep(60)
-                continue
+            # Use a single connection for advisory lock to ensure lock/unlock
+            # happen on the same Postgres session. Connection pool otherwise
+            # routes lock and unlock to different connections, breaking the lock.
+            async with pool.acquire() as conn:
+                got_lock = await conn.fetchval("SELECT pg_try_advisory_lock(8675309)")
+                if not got_lock:
+                    await asyncio.sleep(60)
+                    continue
 
-            try:
-                await _run_heartbeat_check(pool)
-            finally:
-                await pool.execute("SELECT pg_advisory_unlock(8675309)")
+                try:
+                    await _run_heartbeat_check(conn)
+                finally:
+                    await conn.execute("SELECT pg_advisory_unlock(8675309)")
 
         except asyncio.CancelledError:
             logger.info("Heartbeat checker stopped")
@@ -58,18 +64,20 @@ async def heartbeat_loop():
         await asyncio.sleep(60)
 
 
-async def _run_heartbeat_check(pool):
-    """Core heartbeat check logic. Caller holds advisory lock."""
-    # Find agents that have gone silent
-    overdue = await pool.fetch(
-        """
+async def _run_heartbeat_check(conn):
+    """Core heartbeat check logic. Caller holds advisory lock on conn."""
+    # Find agents that have gone silent.
+    # Uses GREATEST to enforce a minimum timeout floor regardless of what's
+    # stored in the DB column. Prevents false positives from timeout < write interval.
+    overdue = await conn.fetch(
+        f"""
         SELECT id, address, allowed_contact, credit_balance,
                last_seen_at, user_id, nonce_enabled
         FROM agents
         WHERE alert_status = 'active'
           AND heartbeat_enabled = TRUE
           AND last_seen_at IS NOT NULL
-          AND last_seen_at < now() - (heartbeat_timeout * interval '1 second')
+          AND last_seen_at < now() - (GREATEST(heartbeat_timeout, {MIN_TIMEOUT_SECONDS}) * interval '1 second')
           AND agent_down_notified = FALSE
           AND (alert_mute_until IS NULL OR alert_mute_until < now())
         """
@@ -88,7 +96,7 @@ async def _run_heartbeat_check(pool):
 
         # Generate nonce for alert reply-to (only if nonce_enabled)
         if agent.get("nonce_enabled", False):
-            alert_nonce = await generate_nonce(pool, agent_id)
+            alert_nonce = await generate_nonce(conn, agent_id)
             alert_reply_to = build_reply_to(address, alert_nonce)
         else:
             alert_reply_to = f"{address}@{settings.mail_domain}"
@@ -105,14 +113,14 @@ async def _run_heartbeat_check(pool):
             reply_to=alert_reply_to,
         )
 
-        await pool.execute(
+        await conn.execute(
             "UPDATE agents SET agent_down_notified = TRUE WHERE id = $1",
             agent["id"],
         )
         logger.info("Sent agent-down alert for %s", address)
 
     # Un-mute expired mutes
-    await pool.execute(
+    await conn.execute(
         """
         UPDATE agents
         SET alert_status = 'active', alert_mute_until = NULL
