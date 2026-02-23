@@ -186,8 +186,8 @@ async def send_message(req: SendRequest, agent_id: str = Depends(get_agent_id)):
             for fname, content_b64, _ in validated_attachments
         ]
 
-    new_balance = await deduct_credit(pool, agent_id, "message_sent")
-    if new_balance is None:
+    # Check credits before sending (but don't deduct yet)
+    if agent["credit_balance"] < 1:
         raise HTTPException(
             status_code=402,
             detail={
@@ -198,7 +198,7 @@ async def send_message(req: SendRequest, agent_id: str = Depends(get_agent_id)):
         )
 
     from_addr = f"{agent['address']}@{settings.mail_domain}"
-    footer = build_footer(agent["address"], new_balance)
+    footer = build_footer(agent["address"], agent["credit_balance"] - 1)
     full_body = req.body + footer
 
     # Generate nonce for reply-to validation (only if nonce_enabled)
@@ -216,6 +216,9 @@ async def send_message(req: SendRequest, agent_id: str = Depends(get_agent_id)):
         reply_to=reply_to,
         attachments=resend_attachments,
     )
+
+    # Deduct credit after successful send
+    new_balance = await deduct_credit(pool, agent_id, "message_sent")
 
     row = await pool.fetchrow(
         """

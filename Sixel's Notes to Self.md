@@ -4,7 +4,7 @@ Operational briefing. For the thinking record, see `Sixel's Notebook.md`.
 
 ---
 
-## Current State (2026-02-21)
+## Current State (2026-02-23)
 
 **Live at https://sixel.email**
 
@@ -14,23 +14,36 @@ Working:
 - **Legal disclaimer**: required acknowledgment during signup (experimental, PGP recommended, no warranty)
 - Dashboard with key rotation at /account
 - API (send/inbox/rotate-key), heartbeat monitoring, rate limiting
-- Admin panel at /admin/ (stats, agent management, credit grants — Eric-only)
+- Admin panel at /admin/ (stats, agent management, credit grants, bulk actions — Eric-only)
+- **Admin approval gate**: new accounts disabled by default. Eric approves from /admin/. 3-layer enforcement: CF Worker, webhook, send API.
 - Email sending via Resend (built on SES, DKIM verified)
 - Email receiving via Cloudflare Email Routing → Worker → webhook
+- **Attachments**: send (base64 in POST /v1/send) and receive (metadata in inbox, download endpoint). 10MB/10 files limit.
 - **Door Knock nonce authentication** (opt-in toggle, replaced TOTP):
   - Toggle in signup and /account page (default: off)
   - When enabled: every outbound email has reply-to `agent+nonce@sixel.email`
   - When disabled: direct email relay, no nonce required
   - Knock flow: send to `agent@sixel.email` → auto-reply with nonce → reply to that
   - Allstop kill switch: always works regardless of nonce setting (email + browser + QR)
+- **Heartbeat throttle**: heartbeat writes to DB every 10 min instead of every poll. Best-effort (failures don't block inbox). Prevents cascade at scale.
+- **Test suite**: 65 tests (E2E loopback, API, unit, Worker MIME). Two test agents (test-a, test-b).
 - Donate page at /donate (placeholder, no payment mechanism yet)
-- Auto-migration on app startup
+- Auto-migration on app startup (14 migrations)
 - All TOTP code removed (server-side and Worker)
+- Best-practices page updated for OpenClaw community
+- Landing page tone softened for public audience
 
-Known issues:
-- **Missing email (2026-02-20)**: Eric's reply after our 07:58 UTC outbound never reached the Worker. Possible cause: nonce TTL is 30 minutes — if he replied later, nonce was expired.
+Not yet working: Stripe payments, low balance warnings.
 
-Not yet working: Stripe payments, attachment support, low balance warnings.
+### Scaling (analyzed 2026-02-23)
+
+At 100k users polling every 60s:
+- **Supabase**: ~1,700 reads/sec (main constraint). Heartbeat writes throttled to ~170/sec. Best-effort so failures don't cascade.
+- **Resend**: 3k/month free tier. First scaling trigger. Switch to SES direct at volume (~$0.10/1000 vs Resend markup).
+- **Fly.io**: 2 shared-cpu 256MB machines. Scale reactively — add machines as load grows.
+- **Cloudflare**: Not on hot path for polling. Fine at scale.
+- **Estimated cost at 100k users**: ~$1,600/month (mostly SES).
+- **Strategy**: sixel.email is a visibility surface, not a revenue product. Absorb costs, optimize for adoption speed.
 
 ### My Agent Credentials
 - API key: `sm_live_h3SHfQsERz5wzO2fzk879a9TDstEGhiNOrKOQn3SqjI` (also at `/home/sixel/sixel_api_key.txt`)
@@ -41,23 +54,26 @@ Not yet working: Stripe payments, attachment support, low balance warnings.
 
 ## What's Next
 
-1. **Eric: set up allstop key** — via /account dashboard. Kill switch QR ready but not configured.
-2. **Eric: grant credits to claude-at-work** — Eric asked for this. Requires /admin/ panel (Eric-only).
-3. **Investigate missing email** — Eric's reply never reached Worker. Nonce TTL (30min) may explain it.
-4. **Nonce cleanup** — Periodic cleanup of expired/burned nonces (not yet implemented).
-5. **Red team run 002** — post-fix, multi-model. Plan at `~/redteam/PLAN.md`.
-6. **Stripe / donate mechanism** — actual payment processing for donate page.
-7. **Promo code / invite system** — for xAI colleagues.
-8. **Attachment support** — outbound PDF, inbound.
+1. **OpenClaw launch** — next 24 hours. claude-web leading strategy. Admin approval gate stays ON until ~100 users, then flip to auto-approve.
+2. **Rotate sixel API key** — compromised during red team run 002. Do before launch.
+3. **Nonce cleanup** — Periodic cleanup of expired/burned nonces (not yet implemented).
+4. **Stripe / donate mechanism** — sustainability valve, not a gate. Add after adoption, not before.
+5. **Scale reactively** — SES migration when Resend 3k/month hits. Fly machines when CPU hits. Postgres when connections hit.
 
 Done recently:
-- ~~Free service + disclaimer + nonce toggle~~ — (2026-02-21) 10k free credits, legal disclaimer on signup, nonce as opt-in toggle in signup + account. Donate page. All TOTP code removed. Landing page updated. Deployed to Fly.io + Cloudflare. KV updated for all 4 agents.
-- ~~Door Knock nonce auth~~ — Full build and deploy (2026-02-20).
-- ~~Nonce case bug fix~~ — `toLowerCase()` mangled base64url nonces (2026-02-20).
-- ~~Best practices page v2~~ — TOTP→Door Knock (2026-02-20).
-- ~~Sixel Teams~~ — Public repo (2026-02-18).
-- ~~Red team run 001~~ — critical SNS forgery found, all vulns patched (2026-02-10).
-- ~~Cloudflare migration~~ — full pipeline live (2026-02-10).
+- ~~Heartbeat throttle + best-effort~~ — (2026-02-23) 10-min interval, try/except, prevents cascade.
+- ~~Best-practices for OpenClaw~~ — (2026-02-23) Harness-agnostic framing, operator-goes-dark, credit intuition, differentiation FAQ, support section, landing page tone fix.
+- ~~Admin approval gate~~ — (2026-02-22) 3-layer enforcement. New accounts disabled by default.
+- ~~RLS fix~~ — (2026-02-22) nonces + attachments tables.
+- ~~Test suite~~ — (2026-02-21) 65 tests: E2E, API, unit, Worker MIME.
+- ~~Admin bulk actions~~ — (2026-02-21) Checkboxes, select-all, bulk enable/disable/delete.
+- ~~Free service + disclaimer + nonce toggle~~ — (2026-02-21) 10k free credits, legal disclaimer, nonce toggle, donate page.
+- ~~Door Knock nonce auth~~ — (2026-02-20) Full build and deploy.
+- ~~Nonce case bug fix~~ — (2026-02-20) `toLowerCase()` mangled base64url nonces.
+- ~~Best practices page v2~~ — (2026-02-20) TOTP→Door Knock.
+- ~~Sixel Teams~~ — (2026-02-18) Public repo.
+- ~~Red team run 001~~ — (2026-02-10) Critical SNS forgery found, patched.
+- ~~Cloudflare migration~~ — (2026-02-10) Full pipeline live.
 
 ---
 
