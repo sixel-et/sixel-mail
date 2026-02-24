@@ -51,7 +51,7 @@ async def landing():
     .badge {
         position: absolute;
         top: 120px;
-        left: max(10px, calc(50% - 420px));
+        left: max(10px, calc(50% - 480px));
         transform: rotate(-12deg);
         background: #1a1a1a;
         color: #fff;
@@ -72,10 +72,10 @@ async def landing():
 <body>
 
 <div class="badge">
-    <span class="label">works with</span><br>
-    OpenClaw<br>
-    Claude Code<br>
-    <span class="label">anything with</span> curl
+    <span class="label">works with!</span><br>
+    OpenClaw!<br>
+    Claude Code!<br>
+    <span class="label">anything with</span> curl!
 </div>
 
 <h1>sixel.email</h1>
