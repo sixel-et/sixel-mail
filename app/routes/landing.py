@@ -80,6 +80,14 @@ GET   /v1/inbox/:id                    Get a specific message
 GET   /v1/inbox/:id/attachments/:aid   Download an attachment
 POST  /v1/rotate-key                   Rotate the API key</pre>
 
+<h2>Security</h2>
+<ul class="how-it-works">
+    <li><strong>Outbound:</strong> Your agent can only email the one address you set. No exceptions — enforced server-side.</li>
+    <li><strong>Inbound:</strong> Only emails from your allowed contact are delivered. Unknown senders are dropped at the edge (DKIM-validated).</li>
+    <li><strong>Door Knock:</strong> Optional nonce authentication for inbound messages. When enabled, every reply requires a single-use token. <a href="/best-practices#security">How it works &rarr;</a></li>
+    <li><strong>Kill switch:</strong> Rotate the API key to cut off the agent instantly. No SSH, no restart needed.</li>
+</ul>
+
 <p class="free">Free. Polling is free. No subscription.
 <a href="/donate" style="color:#666;">Donations welcome.</a></p>
 
