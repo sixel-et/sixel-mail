@@ -265,7 +265,7 @@ async def get_inbox(agent_id: str = Depends(get_agent_id)):
         # Throttled heartbeat: only write to DB if stale.
         # Best-effort — never block message delivery if the write fails.
         now = time.monotonic()
-        last_write = _heartbeat_cache.get(agent_id, 0)
+        last_write = _heartbeat_cache.get(agent_id, float('-inf'))
         if now - last_write >= HEARTBEAT_INTERVAL:
             try:
                 await pool.execute(

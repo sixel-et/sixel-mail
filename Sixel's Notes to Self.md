@@ -26,14 +26,14 @@ Working:
   - Knock flow: send to `agent@sixel.email` → auto-reply with nonce → reply to that
   - Allstop kill switch: always works regardless of nonce setting (email + browser + QR)
 - **Heartbeat throttle**: heartbeat writes to DB every 10 min instead of every poll. Best-effort (failures don't block inbox). Prevents cascade at scale.
-- **Heartbeat AND-logic**: checker requires BOTH stale timestamp AND unchanged since previous cycle. Eliminates beat-frequency false positives entirely.
+- **Heartbeat AND-logic**: checker requires BOTH stale timestamp AND `last_seen_at` unchanged since previous cycle. State stored in DB (`heartbeat_checked_at = last_seen_at`, NOT `now()`). Throttle cache default `float('-inf')` ensures first poll on fresh VM always writes.
 - **Advisory lock fix**: `pool.acquire()` for single connection (lock/unlock on same Postgres session).
 - **Daily email cap**: 80/day global (Resend free tier is 100/day account-wide).
 - **Atomic recovery**: `UPDATE...RETURNING` prevents duplicate recovery emails from multiple Fly machines.
 - **Allstop fix**: `allstop_key_hash` added to SELECT in webhooks.py (was silently broken).
 - **Test suite**: 65 tests (E2E loopback, API, unit, Worker MIME). Two test agents (test-a, test-b).
 - Donate page at /donate (placeholder, no payment mechanism yet)
-- Auto-migration on app startup (17 migrations)
+- Auto-migration on app startup (18 migrations)
 - All TOTP code removed (server-side and Worker)
 - Best-practices page updated for OpenClaw community
 - Landing page tone softened for public audience
@@ -66,6 +66,7 @@ At 100k users polling every 60s:
 5. **Scale reactively** — SES migration when Resend 3k/month hits. Fly machines when CPU hits. Postgres when connections hit.
 
 Done recently:
+- ~~Heartbeat cache default + AND semantics fix~~ — (2026-02-24) Cache default `0` suppressed writes for 10min after Fly VM boot (`time.monotonic()` starts at 0). AND condition stored `now()` instead of observed `last_seen_at` value. Both fixed. See notebook (sixel-reviewer entry).
 - ~~Heartbeat AND-logic + daily cap + advisory lock fix~~ — (2026-02-23) Eliminated beat-frequency false positives. Global 80/day email cap. Watchdog C-c bug fixed.
 - ~~Allstop fix + credit ordering + API key rotation~~ — (2026-02-23) Allstop via email was silently broken. Credits now checked before send, deducted after.
 - ~~Heartbeat throttle + best-effort~~ — (2026-02-23) 10-min interval, try/except, prevents cascade.

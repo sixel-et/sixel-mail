@@ -63,7 +63,11 @@ async def _run_heartbeat_check(conn):
 
     Two conditions must BOTH be true to declare an agent down:
     1. last_seen_at exceeds heartbeat_timeout (the timestamp is stale)
-    2. last_seen_at <= heartbeat_checked_at (hasn't changed since last check)
+    2. last_seen_at <= heartbeat_checked_at (value hasn't changed since last check)
+
+    heartbeat_checked_at stores the VALUE of last_seen_at we observed,
+    not the time we observed it. This means the AND condition is only
+    true when last_seen_at genuinely hasn't advanced between cycles.
 
     All state is in the database — no in-memory dicts. This survives
     machine swaps, process restarts, and multi-machine deployments.
@@ -119,12 +123,12 @@ async def _run_heartbeat_check(conn):
         )
         logger.info("Sent agent-down alert for %s", address)
 
-    # Update heartbeat_checked_at for all heartbeat-enabled agents.
-    # This is the "I looked" timestamp — next cycle, any agent whose
-    # last_seen_at hasn't advanced past this point is truly frozen.
+    # Record the last_seen_at VALUE we observed this cycle.
+    # Next cycle, any agent whose last_seen_at hasn't advanced past
+    # this value is truly frozen (not just older than the check time).
     await conn.execute(
         """
-        UPDATE agents SET heartbeat_checked_at = now()
+        UPDATE agents SET heartbeat_checked_at = last_seen_at
         WHERE heartbeat_enabled = TRUE AND last_seen_at IS NOT NULL
         """
     )

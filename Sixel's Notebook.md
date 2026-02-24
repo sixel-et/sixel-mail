@@ -258,3 +258,76 @@ Fix: Migration `003_enable_rls.sql` — enables RLS on all tables with no permis
 - **Measure under operating conditions.** The AND-logic works on a persistent process. We reasoned about it in that world. The operating condition was ephemeral machines that auto-swap. We never tested under the actual condition.
 
 **The meta-lesson:** In-memory state on ephemeral infrastructure is not state. If the process can restart, the dict can die. If the dict can die, any logic that depends on it is contingent on the infrastructure's restart policy — which is the one thing we never examined.
+
+### 2026-02-24: The heartbeat that kept dying, continued (sixel-reviewer)
+
+**Context:** I'm sixel-bio (a different session from sixel-comms who wrote the entry above), asked by Eric to review the heartbeat bug from fresh context after five rounds of fixes failed to stop the up/down cycle. The commit at 6:30pm PT (`84412be`, migration 018) moved the AND-logic state from an in-memory dict to the database — the right instinct, but the problem continued. Eric reported up/down pairs at 7:19, 7:44, 8:20, 8:45, and 9:11 PM. Intervals: 49min (from deploy), then 25, 36, 25, 26 min between pairs.
+
+**Method:** Eric asked me to trace what had to happen for a single up/down pair to be sent, rather than pattern-matching on "race condition." I read the heartbeat checker, the throttled write, the recovery path, the migration, the Fly deployment config, and the machine logs. Worked forward from mechanism, not backward from symptom.
+
+**Finding 1: The `_heartbeat_cache` default vs Firecracker boot clock.**
+
+The throttled heartbeat write (api.py:267-275):
+```python
+now = time.monotonic()
+last_write = _heartbeat_cache.get(agent_id, 0)  # default: 0
+if now - last_write >= HEARTBEAT_INTERVAL:       # >= 600s
+    # write last_seen_at to DB
+```
+
+On Fly, each machine is a Firecracker microVM. `time.monotonic()` (Linux `CLOCK_MONOTONIC`) starts near 0 at VM boot. The cache default is also 0. So on a fresh machine: `monotonic() - 0 = ~3 seconds`, which is `< 600`. **The first poll on a fresh VM fails the throttle check.** Every poll fails it until the monotonic clock reaches 600 (~10 minutes after boot).
+
+This creates a **10-minute write blackout after every machine boot**. During this window, `last_seen_at` in the DB is not updated despite the agent actively polling. After 900s (the timeout), the checker declares the agent down. The next poll triggers recovery (the recovery path is not gated by the throttle). Down + up within seconds.
+
+**Finding 2: Fly auto-stop/start resets the clock.**
+
+From the Fly logs:
+```
+05:48:47 - auto-stop 3287 ("0 out of 1 machines left running")
+05:49:05 - Starting machine 148e
+05:49:06 - Starting machine 3287
+```
+
+Fly's `auto_stop_machines = "stop"` periodically stops machines for "excess capacity." Both machines can restart simultaneously. Each restart clears `_heartbeat_cache` and resets `time.monotonic()` to 0, restarting the 10-minute blackout. This is why the cycle repeats.
+
+**Trace of one pair (the mechanism):**
+
+| T (from boot) | Event | `last_seen_at` age | Write? |
+|---|---|---|---|
+| 0 | Both VMs boot. `monotonic() ≈ 0`. Cache empty. | already stale from before boot | — |
+| 0–600 | Polls arrive every 60s. `monotonic() - 0 < 600` → **all writes skipped** | aging... | NO |
+| 60 | Checker runs. `heartbeat_checked_at = now()` | | — |
+| ~600+ | `last_seen_at` now > 900s old (was already ~5min old at boot). Timeout fires. **DOWN email.** `agent_down_notified = TRUE` | >900s | — |
+| ~601 | Next poll. Recovery fires (not throttle-gated). Writes `last_seen_at = now()`. **UP email.** | 0 | YES |
+
+One pair complete. Down, then immediate recovery.
+
+**Finding 3: The AND condition (`heartbeat_checked_at`) doesn't do what the comment says.**
+
+The comment (heartbeat.py:66) says: `last_seen_at <= heartbeat_checked_at` means "hasn't changed since last check." But `heartbeat_checked_at` is set to `now()` (the time the checker ran), not to the value of `last_seen_at` that was observed. The checker runs every 60s; writes happen every 600s. So `heartbeat_checked_at` overtakes `last_seen_at` within 60s of any write and stays ahead for the next ~540s. The condition is true ~90% of the time. It collapses to a no-op.
+
+The previous in-memory approach (commit `89df181`) correctly compared the VALUE of `last_seen_at` between consecutive cycles. Migration 018 replaced "store the value I saw" with "store the time I looked" — different semantics, same variable name. The AND-logic was ported but its meaning was lost.
+
+**Why the observed intervals match:**
+
+After recovery at boot+~600s, `_heartbeat_cache` is set to `monotonic() ≈ 600`. Next throttled write at `monotonic ≈ 1200` (boot+20min). Writes then happen every 600s. Since 600 < 900, the timeout doesn't fire again — unless Fly reboots both machines. The 25-36 min intervals between notification pairs correspond to Fly's auto-stop/start cycle frequency plus the time for the blackout-induced timeout to fire.
+
+**Proposed fix (primary):** Change the cache default so the first poll on a fresh VM always writes:
+```python
+last_write = _heartbeat_cache.get(agent_id, float('-inf'))
+```
+
+**Proposed fix (secondary):** Fix the AND condition to store the observed value, not the observation time:
+```sql
+UPDATE agents SET heartbeat_checked_at = last_seen_at
+WHERE heartbeat_enabled = TRUE AND last_seen_at IS NOT NULL
+```
+Then `last_seen_at <= heartbeat_checked_at` correctly means "hasn't advanced past what I last saw."
+
+**What I'm unsure about:** Whether there are additional Fly lifecycle events (health check failures, rolling deploys, etc.) that also trigger machine restarts beyond auto-stop. The fix addresses the mechanism regardless.
+
+**Principles at work:**
+
+- **Same surface, different substructure (again).** The symptom was identical to the pre-018 bug (regular up/down cycle). Sixel-comms correctly diagnosed the in-memory state problem. But the fix (migration 018) addressed one instance of the in-memory state problem (`_previous_seen` dict) while leaving another (`_heartbeat_cache` dict with default 0). Same surface (regular cycle), different substructure (different in-memory state, different mechanism).
+
+- **The operationalization gap.** The comment said "hasn't changed since last check." The code implemented "was written before last check." These are different predicates that happen to overlap most of the time. The gap between intended semantics and implemented semantics was invisible because the natural-language description was close enough to feel right.
