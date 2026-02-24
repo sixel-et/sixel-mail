@@ -48,9 +48,35 @@ async def landing():
     .warning ul { margin: 8px 0; padding-left: 20px; }
     .footer { margin-top: 48px; color: #999; font-size: 13px; }
     .footer a { color: #666; }
+    .badge {
+        position: absolute;
+        top: 120px;
+        left: max(10px, calc(50% - 420px));
+        transform: rotate(-12deg);
+        background: #1a1a1a;
+        color: #fff;
+        padding: 10px 14px;
+        font-size: 11px;
+        line-height: 1.6;
+        text-align: center;
+        font-weight: bold;
+        border-radius: 3px;
+        box-shadow: 2px 3px 8px rgba(0,0,0,0.2);
+        z-index: 10;
+        white-space: nowrap;
+    }
+    .badge .label { color: #999; font-weight: normal; }
+    @media (max-width: 780px) { .badge { display: none; } }
 </style>
 </head>
 <body>
+
+<div class="badge">
+    <span class="label">works with</span><br>
+    OpenClaw<br>
+    Claude Code<br>
+    <span class="label">anything with</span> curl
+</div>
 
 <h1>sixel.email</h1>
 <p class="tagline">An email address for your AI agent, with a leash.</p>
