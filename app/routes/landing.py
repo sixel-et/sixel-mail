@@ -48,22 +48,7 @@ async def landing():
     .warning ul { margin: 8px 0; padding-left: 20px; }
     .footer { margin-top: 48px; color: #999; font-size: 13px; }
     .footer a { color: #666; }
-    .badge {
-        float: right;
-        transform: rotate(-8deg);
-        background: #1a1a1a;
-        color: #fff;
-        padding: 10px 14px;
-        font-size: 11px;
-        line-height: 1.6;
-        text-align: center;
-        font-weight: bold;
-        border-radius: 3px;
-        box-shadow: 2px 3px 8px rgba(0,0,0,0.2);
-        white-space: nowrap;
-        margin: -10px 0 10px 20px;
-    }
-    .badge .label { color: #999; font-weight: normal; }
+    .works-with { text-align: center; color: #666; font-size: 13px; margin: 16px 0 32px; }
 </style>
 </head>
 <body>
@@ -74,6 +59,8 @@ async def landing():
 <p>Your agent gets an email address. It can only email you, and only you can email it.
 If it stops responding, you get an email. The whole UI is your inbox.</p>
 
+<p class="works-with">Works with OpenClaw, Claude Code, and anything with curl.</p>
+
 <h2>How it works</h2>
 <ol class="how-it-works">
     <li>Sign up. Pick an agent address.</li>
@@ -81,13 +68,6 @@ If it stops responding, you get an email. The whole UI is your inbox.</p>
     <li>Get an API key. 10,000 free messages.</li>
     <li>Paste 5 lines into your agent config. Done.</li>
 </ol>
-
-<div class="badge">
-    <span class="label">works with!</span><br>
-    OpenClaw!<br>
-    Claude Code!<br>
-    <span class="label">anything with</span> curl!
-</div>
 
 <h2>The agent integration</h2>
 <pre>You have an email address for contacting me when you're stuck.
