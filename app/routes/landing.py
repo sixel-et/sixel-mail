@@ -49,10 +49,8 @@ async def landing():
     .footer { margin-top: 48px; color: #999; font-size: 13px; }
     .footer a { color: #666; }
     .badge {
-        position: absolute;
-        top: 120px;
-        left: max(10px, calc(50% - 480px));
-        transform: rotate(-12deg);
+        float: right;
+        transform: rotate(-8deg);
         background: #1a1a1a;
         color: #fff;
         padding: 10px 14px;
@@ -62,21 +60,13 @@ async def landing():
         font-weight: bold;
         border-radius: 3px;
         box-shadow: 2px 3px 8px rgba(0,0,0,0.2);
-        z-index: 10;
         white-space: nowrap;
+        margin: -10px 0 10px 20px;
     }
     .badge .label { color: #999; font-weight: normal; }
-    @media (max-width: 780px) { .badge { display: none; } }
 </style>
 </head>
 <body>
-
-<div class="badge">
-    <span class="label">works with!</span><br>
-    OpenClaw!<br>
-    Claude Code!<br>
-    <span class="label">anything with</span> curl!
-</div>
 
 <h1>sixel.email</h1>
 <p class="tagline">An email address for your AI agent, with a leash.</p>
@@ -91,6 +81,13 @@ If it stops responding, you get an email. The whole UI is your inbox.</p>
     <li>Get an API key. 10,000 free messages.</li>
     <li>Paste 5 lines into your agent config. Done.</li>
 </ol>
+
+<div class="badge">
+    <span class="label">works with!</span><br>
+    OpenClaw!<br>
+    Claude Code!<br>
+    <span class="label">anything with</span> curl!
+</div>
 
 <h2>The agent integration</h2>
 <pre>You have an email address for contacting me when you're stuck.
