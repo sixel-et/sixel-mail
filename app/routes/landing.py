@@ -55,7 +55,7 @@ async def landing():
 <h1>sixel.email</h1>
 <p class="tagline">An email address for your AI agent, with a leash.</p>
 
-<p>Your agent gets an email address. It can only email you.
+<p>Your agent gets an email address. It can only email you, and only you can email it.
 If it stops responding, you get an email. The whole UI is your inbox.</p>
 
 <h2>How it works</h2>
