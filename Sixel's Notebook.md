@@ -230,3 +230,31 @@ Supabase flagged all 6 tables (`users`, `agents`, `messages`, `api_keys`, `credi
 Red team run 001 attacker actually tried this ("Supabase Direct Access") and got 401 — the anon key isn't publicly exposed. But it's still a misconfiguration.
 
 Fix: Migration `003_enable_rls.sql` — enables RLS on all tables with no permissive policies. Our backend uses the `service_role` connection string (bypasses RLS), so the app is unaffected. PostgREST access is now blocked.
+
+### 2026-02-23/24: The heartbeat that kept dying (founding story candidate)
+
+**The symptom:** Agent declared offline every ~30 minutes, then immediately online again. Offline/online email pairs cycling endlessly. Burned through Resend's daily 100-email quota overnight.
+
+**The five fixes that didn't work:**
+
+1. **Raise timeout** (300s → 900s) — changed the interval from ~36 min to ~30 min. Beat frequency shifted, not eliminated.
+2. **Fix advisory lock** — `pg_try_advisory_lock` was splitting across pooled connections (lock on one, unlock on another). Fixed with `pool.acquire()`. Problem continued.
+3. **Raise timeout floor** (1200s, then 1800s) — Eric identified this as whack-a-mole. Any static timeout produces beat frequencies against throttled writes.
+4. **AND-logic** — require BOTH stale timestamp AND unchanged since previous cycle. Correct logic, but stored `_previous_seen` in a Python dict. Problem continued.
+5. **Reason about two-machine sync** — concluded advisory lock serializes access, both machines share DB. Looked safe. Problem continued.
+
+**The root cause:** Fly.io auto-stop/auto-start was swapping which machine was active. Each swap cleared the in-memory `_previous_seen` dict. The AND-logic worked perfectly within a single persistent process — and the infrastructure guaranteed the process wasn't persistent.
+
+**How we found it:** Eric asked "are we too close to this to see it?" and suggested walking through my assumptions explicitly. Assumption #4 ("only one checker running") led to `flyctl machines list` which showed the machines had swapped since the last check. The `_previous_seen` dict — two copies on two machines — was two sources of truth when there should be one.
+
+**The fix:** Move `_previous_seen` to the database. One column (`heartbeat_checked_at`), pure SQL, single source of truth, survives machine swaps and restarts.
+
+**Principles at work:**
+
+- **The Streetlight Effect.** Four iterations of fixing the algorithm (where the code was) when the problem was in the infrastructure (where we weren't looking). We tuned timeouts, fixed locks, added logic — all under the streetlight. The dark was: "what does Fly do with idle machines?"
+
+- **For Want of a Nail.** The `_previous_seen` dict was the nail. AND-logic → depended on dict persistence → depended on process persistence → depended on machine persistence → Fly auto-stops machines. Remove the nail (machine swap), lose the kingdom (alert accuracy).
+
+- **Measure under operating conditions.** The AND-logic works on a persistent process. We reasoned about it in that world. The operating condition was ephemeral machines that auto-swap. We never tested under the actual condition.
+
+**The meta-lesson:** In-memory state on ephemeral infrastructure is not state. If the process can restart, the dict can die. If the dict can die, any logic that depends on it is contingent on the infrastructure's restart policy — which is the one thing we never examined.
