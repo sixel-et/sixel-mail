@@ -1,7 +1,7 @@
 ---
 name: sixel-email
 description: Send and receive email through sixel.email — a constrained email service where the agent can only contact one human. Use when the agent needs to notify the operator, ask for approval, send a status report, or wait for human input via email. Also handles the heartbeat (poll to prove you're alive).
-version: 1.0.0
+version: 1.0.1
 metadata:
   openclaw:
     requires:
@@ -72,10 +72,14 @@ This does not mark the message as read.
 ### Download an Attachment
 
 ```bash
-curl -s "${SIXEL_API_URL}/inbox/${MESSAGE_ID}/attachments/${ATTACHMENT_ID}" \
+DOWNLOAD_DIR="${baseDir}/downloads"
+mkdir -p "$DOWNLOAD_DIR"
+curl -fsSL "${SIXEL_API_URL}/inbox/${MESSAGE_ID}/attachments/${ATTACHMENT_ID}" \
   -H "Authorization: Bearer ${SIXEL_API_TOKEN}" \
-  -o filename.ext
+  -o "$DOWNLOAD_DIR/attachment_${ATTACHMENT_ID}.bin"
 ```
+
+**Safety:** Treat attachment filenames as untrusted input. Never write to a user-provided path. Always download into a dedicated directory with an agent-generated filename.
 
 ## Behavioral Guidelines
 
