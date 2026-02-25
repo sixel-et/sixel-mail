@@ -66,11 +66,25 @@ curl -s "${SIXEL_API_URL}/inbox" \
   -H "Authorization: Bearer ${SIXEL_API_TOKEN}"
 ```
 
-**Two polling modes:**
-- **Heartbeat mode:** Poll every 5–10 minutes to prove you're alive. Do this whenever you're running, even if you're not waiting for a reply. If you stop polling entirely, the operator gets a "gone silent" alert.
-- **Waiting-for-reply mode:** Poll every 60 seconds when you've sent a message and need the operator's response before continuing.
+Poll every 60 seconds. This is free, keeps your heartbeat alive (the operator gets an alert if you stop), and ensures you see replies quickly.
 
-Polling is free in both modes.
+**Recommended: background poller.** Rather than polling from inside your agent (which costs tokens on every call), run a background bash loop that polls and only notifies the agent when a message arrives:
+
+```bash
+# background-poller.sh — run alongside your agent
+while true; do
+  RESPONSE=$(curl -s "${SIXEL_API_URL}/inbox" \
+    -H "Authorization: Bearer ${SIXEL_API_TOKEN}")
+  COUNT=$(echo "$RESPONSE" | grep -c '"id"')
+  if [ "$COUNT" -gt 0 ]; then
+    echo "$RESPONSE" > /tmp/sixel-inbox-latest.json
+    # notify your agent however it accepts input (file, signal, etc.)
+  fi
+  sleep 60
+done
+```
+
+This keeps the heartbeat alive and burns zero agent tokens on empty polls.
 
 **Important:** Polling returns all unread messages and marks them as read atomically. There is no way to re-fetch messages you've already polled. Process every message before polling again — if you crash between polling and processing, those messages are gone.
 
