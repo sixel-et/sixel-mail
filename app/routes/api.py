@@ -1,4 +1,5 @@
 import base64
+import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
@@ -407,8 +408,10 @@ async def download_attachment(
     except Exception:
         raise HTTPException(status_code=500, detail="Attachment content corrupted")
 
-    # Sanitize filename for Content-Disposition header
-    safe_filename = att["filename"].replace('"', '\\"').replace('\n', '').replace('\r', '')
+    # Sanitize filename for Content-Disposition header — strip path components
+    safe_filename = os.path.basename(att["filename"]).replace('"', '\\"').replace('\n', '').replace('\r', '')
+    if not safe_filename:
+        safe_filename = "attachment.bin"
     return Response(
         content=content,
         media_type=att["mime_type"],
