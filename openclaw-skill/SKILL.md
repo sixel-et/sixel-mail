@@ -1,7 +1,7 @@
 ---
 name: sixel-email
-description: Send and receive email through sixel.email — a constrained email service where the agent can only contact one human. Use when the agent needs to notify the operator, ask for approval, send a status report, or wait for human input via email. Also handles the heartbeat (poll to prove you're alive).
-version: 1.0.1
+description: 1:1 email channel for agents — the agent can only email one address, and only that address can email the agent. Also handles the heartbeat (poll to prove you're alive).
+version: 1.0.2
 metadata:
   openclaw:
     requires:
