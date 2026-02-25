@@ -1,15 +1,8 @@
 ---
 name: sixel-email
 description: 1:1 email channel for agents — the agent can only email one address, and only that address can email the agent. Also handles the heartbeat (poll to prove you're alive).
-version: 1.0.2
-metadata:
-  openclaw:
-    requires:
-      env:
-        - SIXEL_API_TOKEN
-        - SIXEL_API_URL
-    primaryEnv: SIXEL_API_TOKEN
-    homepage: "https://sixel.email"
+version: 1.0.3
+metadata: {"openclaw":{"requires":{"env":["SIXEL_API_TOKEN","SIXEL_API_URL"]},"primaryEnv":"SIXEL_API_TOKEN","homepage":"https://sixel.email"}}
 ---
 
 # sixel-email
@@ -30,7 +23,24 @@ The operator must have a sixel.email account. They will provide:
 - `SIXEL_API_URL`: The API base URL (default: `https://sixel.email/v1`)
 - `SIXEL_API_TOKEN`: Your API token (starts with `sm_live_`)
 
-These should be set in your OpenClaw config under `skills.entries.sixel-email.env`.
+Add to your OpenClaw config:
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  skills: {
+    entries: {
+      "sixel-email": {
+        enabled: true,
+        env: {
+          SIXEL_API_URL: "https://sixel.email/v1",
+          SIXEL_API_TOKEN: "sm_live_…",
+        },
+      },
+    },
+  },
+}
+```
 
 ## Core Operations
 
@@ -56,7 +66,11 @@ curl -s "${SIXEL_API_URL}/inbox" \
   -H "Authorization: Bearer ${SIXEL_API_TOKEN}"
 ```
 
-**Poll this every 60 seconds when waiting for a reply.** Polling is free and keeps your heartbeat alive. If you stop polling, the operator gets a notification that you've gone silent.
+**Two polling modes:**
+- **Heartbeat mode:** Poll every 5–10 minutes to prove you're alive. Do this whenever you're running, even if you're not waiting for a reply. If you stop polling entirely, the operator gets a "gone silent" alert.
+- **Waiting-for-reply mode:** Poll every 60 seconds when you've sent a message and need the operator's response before continuing.
+
+Polling is free in both modes.
 
 **Important:** Polling returns all unread messages and marks them as read atomically. There is no way to re-fetch messages you've already polled. Process every message before polling again — if you crash between polling and processing, those messages are gone.
 
@@ -103,7 +117,7 @@ curl -fsSL "${SIXEL_API_URL}/inbox/${MESSAGE_ID}/attachments/${ATTACHMENT_ID}" \
 
 - You can only email the one address configured at signup. Attempts to email other addresses will fail.
 - Only your operator's emails are delivered to your inbox. Unknown senders are dropped at the edge (DKIM-validated).
-- Your API token is the only credential. Guard it. If compromised, the operator can rotate it at `POST /v1/rotate-key`.
+- Your API token is the only credential. Guard it. If compromised, the operator can rotate it at `POST ${SIXEL_API_URL}/rotate-key`.
 - Inbound messages from the operator may use nonce-based authentication (Door Knock). If enabled, the operator's replies must include a single-use token — this happens automatically via the Reply-To header.
 - **Never include secrets, passwords, or API keys in email bodies.** Email is transmitted in plaintext unless PGP-encrypted.
 
@@ -123,4 +137,16 @@ If you receive persistent 401 errors, the API key may have been rotated. Stop se
 
 ## Troubleshooting
 
-See `{baseDir}/references/troubleshooting.md` for common issues.
+**401 on every request:** Verify `SIXEL_API_TOKEN` is set and starts with `sm_live_`. Check if the operator recently rotated the key.
+
+**402 Payment Required:** Agent is out of credits. Free tier: 10,000 messages on signup. Operator can check balance at https://sixel.email/account.
+
+**403 Forbidden:** Account pending admin approval. Operator should contact support@sixel.email.
+
+**No messages in inbox:** Confirm the operator is replying to the correct agent address. If Door Knock is enabled, replies must go to the nonce-bearing Reply-To address (automatic in most email clients). Remember: `GET /inbox` marks messages as read — already-polled messages won't reappear.
+
+**Heartbeat alert triggered unexpectedly:** Ensure you're polling at least every 10 minutes during normal operation. Check for network issues or proxy caching.
+
+**Attachments failing:** Total decoded size must be under 10MB, max 10 files. Content must be base64-encoded. Filenames cannot be empty.
+
+**Rate limited (429):** Sends: 100/day per agent. Polls: 120/min per agent. Back off 60 seconds and retry.
