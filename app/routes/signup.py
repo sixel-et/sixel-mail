@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from app.auth import generate_api_key
 from app.config import settings
 from app.db import get_pool
+from app.services.email import send_email
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -288,8 +289,8 @@ async def create_agent(request: Request):
     try:
         agent = await pool.fetchrow(
             """
-            INSERT INTO agents (user_id, address, allowed_contact, credit_balance, nonce_enabled, heartbeat_enabled)
-            VALUES ($1, $2, $3, 10000, $4, $5)
+            INSERT INTO agents (user_id, address, allowed_contact, credit_balance, nonce_enabled, heartbeat_enabled, admin_approved)
+            VALUES ($1, $2, $3, 10000, $4, $5, TRUE)
             RETURNING id
             """,
             user_id,
@@ -310,8 +311,18 @@ async def create_agent(request: Request):
     )
 
     # Sync agent→contact mapping to Cloudflare KV (for Email Worker)
-    # New agents are not admin-approved — blocked at edge until admin approves
-    await _sync_agent_to_kv(address, allowed_contact, nonce_enabled, admin_approved=False)
+    await _sync_agent_to_kv(address, allowed_contact, nonce_enabled, admin_approved=True)
+
+    # Notify Eric of new signup
+    try:
+        await send_email(
+            from_address=f"noreply@{settings.mail_domain}",
+            to_address="eterryphd@gmail.com",
+            subject=f"[sixel.email] New signup: {address}",
+            body=f"New agent signed up:\n\nAddress: {address}@{settings.mail_domain}\nAllowed contact: {allowed_contact}\nNonce enabled: {nonce_enabled}\nHeartbeat enabled: {heartbeat_enabled}\n",
+        )
+    except Exception:
+        logger.warning("Failed to send signup notification for %s", address)
 
     # Generate API key
     key, key_hash, key_prefix = generate_api_key()
