@@ -84,6 +84,9 @@ async def account_page(request: Request):
             amount_dollars = txn["amount"] / 100
             txn_lines += f"  {date_str} — ${amount_dollars:.2f} ({txn['amount']} messages) — {esc(txn['reason'])}<br>\n"
 
+        cc_email = agent.get("cc_email")
+        cc_email_display = esc(cc_email) if cc_email else "<em>none</em>"
+
         heartbeat_enabled = agent.get("heartbeat_enabled", True)
         heartbeat_badge = ' <span style="background:#17a2b8;color:#fff;padding:2px 6px;font-size:12px;">HEARTBEAT OFF</span>' if not heartbeat_enabled else ""
 
@@ -134,6 +137,7 @@ async def account_page(request: Request):
     <h3>{address}@sixel.email{nonce_badge}{heartbeat_badge}{killswitch_badge}{allstop_badge}{pending_badge}</h3>
     <p>Status: {status} (last seen: {last_seen_str})</p>
     <p>Allowed contact: {esc(agent['allowed_contact'])}</p>
+    <p>CC email (tee): {cc_email_display}</p>
     <p>Credits: {agent['credit_balance']} messages</p>
     <p>API key: <code>{key_display}</code></p>
     <p><strong>Recent messages:</strong></p>
@@ -145,6 +149,14 @@ async def account_page(request: Request):
         <input type="email" name="new_contact" placeholder="new-email@example.com"
             style="font-family:monospace;font-size:14px;padding:6px;width:300px;margin:4px 0;">
         <button type="submit" onclick="return confirm('This will:\\n- Change your allowed contact\\n- Clear all message history\\n- Rotate your API key (old key stops working)\\n\\nYou will need to update your agent config with the new key.\\n\\nContinue?')">Update Contact</button>
+    </form>
+    <form method="POST" action="/account/update-cc-email" style="margin: 12px 0;">
+        <input type="hidden" name="agent_id" value="{agent_id}">
+        <label>CC email (copies of all messages forwarded here):</label><br>
+        <input type="email" name="cc_email" placeholder="monitor@example.com" value="{esc(cc_email) if cc_email else ''}"
+            style="font-family:monospace;font-size:14px;padding:6px;width:300px;margin:4px 0;">
+        <button type="submit">Set CC</button>
+        <button type="submit" formaction="/account/clear-cc-email">Clear</button>
     </form>
     <a href="/topup?agent_id={agent_id}"><button>Add credit</button></a>
     <form method="POST" action="/account/rotate-key" style="display:inline">
@@ -441,6 +453,36 @@ async def reactivate_channel(request: Request):
 
     await pool.execute(
         "UPDATE agents SET channel_active = TRUE WHERE id = $1", agent["id"]
+    )
+
+    return RedirectResponse("/account", status_code=303)
+
+
+@router.post("/account/update-cc-email")
+async def update_cc_email(request: Request):
+    """Set the CC email for agent-to-agent monitoring tee."""
+    form = await request.form()
+    pool, agent, user_id = await _get_verified_agent(request, form)
+    cc_email = form.get("cc_email", "").strip()
+
+    if not cc_email or "@" not in cc_email:
+        raise HTTPException(status_code=400, detail="Invalid email address")
+
+    await pool.execute(
+        "UPDATE agents SET cc_email = $1 WHERE id = $2", cc_email, agent["id"]
+    )
+
+    return RedirectResponse("/account", status_code=303)
+
+
+@router.post("/account/clear-cc-email")
+async def clear_cc_email(request: Request):
+    """Clear the CC email."""
+    form = await request.form()
+    pool, agent, user_id = await _get_verified_agent(request, form)
+
+    await pool.execute(
+        "UPDATE agents SET cc_email = NULL WHERE id = $1", agent["id"]
     )
 
     return RedirectResponse("/account", status_code=303)

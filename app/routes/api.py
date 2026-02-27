@@ -1,4 +1,5 @@
 import base64
+import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,6 +16,7 @@ from app.services.nonce import build_reply_to, generate_nonce
 
 import time
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1")
 
 # Heartbeat throttle: only write last_seen_at to DB every N seconds.
@@ -168,7 +170,7 @@ async def send_message(req: SendRequest, agent_id: str = Depends(get_agent_id)):
     pool = await get_pool()
 
     agent = await pool.fetchrow(
-        "SELECT address, allowed_contact, credit_balance, nonce_enabled, admin_approved FROM agents WHERE id = $1",
+        "SELECT address, allowed_contact, credit_balance, nonce_enabled, admin_approved, cc_email FROM agents WHERE id = $1",
         agent_id,
     )
     if not agent:
@@ -199,6 +201,97 @@ async def send_message(req: SendRequest, agent_id: str = Depends(get_agent_id)):
         )
 
     from_addr = f"{agent['address']}@{settings.mail_domain}"
+
+    # --- Agent-to-agent internal routing ---
+    if agent["allowed_contact"].lower().endswith(f"@{settings.mail_domain}"):
+        recipient_address = agent["allowed_contact"].split("@")[0].lower()
+        recipient = await pool.fetchrow(
+            "SELECT id, address, allowed_contact, credit_balance, channel_active, "
+            "admin_approved, cc_email FROM agents WHERE address = $1",
+            recipient_address,
+        )
+        if not recipient:
+            raise HTTPException(status_code=400, detail="Recipient agent not found")
+        if not recipient["admin_approved"]:
+            raise HTTPException(status_code=400, detail="Recipient not available")
+        if not recipient["channel_active"]:
+            raise HTTPException(status_code=400, detail="Recipient channel inactive")
+
+        # Verify bidirectional authorization
+        if recipient["allowed_contact"].lower() != from_addr.lower():
+            raise HTTPException(
+                status_code=403,
+                detail="Recipient does not accept messages from this agent",
+            )
+
+        # Check recipient has credits before charging either party
+        if recipient["credit_balance"] < 1:
+            raise HTTPException(status_code=400, detail="Recipient has insufficient credits")
+
+        # Deduct credits from both parties
+        new_balance = await deduct_credit(pool, agent_id, "message_sent")
+        await deduct_credit(pool, str(recipient["id"]), "message_received")
+
+        # Store outbound message for sender
+        out_row = await pool.fetchrow(
+            """
+            INSERT INTO messages (agent_id, direction, subject, body)
+            VALUES ($1, 'outbound', $2, $3)
+            RETURNING id
+            """,
+            agent_id, req.subject, req.body,
+        )
+        if validated_attachments:
+            await _store_attachments(pool, out_row["id"], validated_attachments)
+
+        # Store inbound message for recipient
+        in_row = await pool.fetchrow(
+            """
+            INSERT INTO messages (agent_id, direction, subject, body, is_read, encrypted)
+            VALUES ($1, 'inbound', $2, $3, FALSE, FALSE)
+            RETURNING id
+            """,
+            recipient["id"], req.subject, req.body,
+        )
+        if validated_attachments:
+            await _store_attachments(pool, in_row["id"], validated_attachments)
+
+        # Tee to cc_email (best-effort, never blocks delivery)
+        if agent.get("cc_email"):
+            try:
+                await send_email(
+                    from_address=from_addr,
+                    to_address=agent["cc_email"],
+                    subject=f"[{agent['address']} -> {recipient['address']}] {req.subject}",
+                    body=req.body,
+                    attachments=resend_attachments,
+                )
+            except Exception:
+                logger.warning("Failed to tee to sender cc_email %s", agent["cc_email"])
+
+        if recipient.get("cc_email"):
+            try:
+                await send_email(
+                    from_address=f"{recipient['address']}@{settings.mail_domain}",
+                    to_address=recipient["cc_email"],
+                    subject=f"[{agent['address']} -> {recipient['address']}] {req.subject}",
+                    body=req.body,
+                    attachments=resend_attachments,
+                )
+            except Exception:
+                logger.warning("Failed to tee to recipient cc_email %s", recipient["cc_email"])
+
+        logger.info(
+            "Internal delivery: %s -> %s (%d attachments)",
+            agent["address"], recipient["address"], len(validated_attachments),
+        )
+        return SendResponse(
+            id=str(out_row["id"]),
+            status="delivered",
+            credits_remaining=new_balance,
+        )
+
+    # --- External email path ---
     footer = build_footer(agent["address"], agent["credit_balance"] - 1)
     full_body = req.body + footer
 
