@@ -194,9 +194,24 @@ async def setup_page(request: Request):
     <label>Agent address:</label><br>
     <input type="text" name="address" id="address" placeholder="my-agent" pattern="[a-z0-9\\-]{{3,30}}" required>
     <span class="suffix">@sixel.email</span><br><br>
-    <label>Your email (the one allowed contact):</label><br>
+
+    <label class="toggle-label">
+        <input type="checkbox" id="pipe-toggle" name="pipe_mode" value="1">
+        Agent-to-agent pipe
+    </label>
+    <p class="note">Create a pair of agents that talk to each other. You get CC'd on all messages.</p>
+
+    <div id="pipe-fields" style="display:none; margin: 12px 0; padding: 12px; background: #f0f7ff; border: 1px solid #cce0ff;">
+        <label>Second agent address:</label><br>
+        <input type="text" name="address_b" id="address_b" placeholder="my-other-agent" pattern="[a-z0-9\\-]{{3,30}}">
+        <span class="suffix">@sixel.email</span><br>
+        <p class="note">Both agents will be set as each other's allowed contact. Your email below will receive copies of all messages between them.</p>
+    </div>
+
+    <label id="email-label">Your email (the one allowed contact):</label><br>
     <input type="email" name="allowed_contact" required><br><br>
 
+    <div id="single-agent-options">
     <label class="toggle-label">
         <input type="checkbox" id="heartbeat-toggle" name="heartbeat_enabled" value="1" checked>
         Enable heartbeat monitoring
@@ -219,6 +234,7 @@ async def setup_page(request: Request):
         <code>agent@sixel.email</code> and you'll get an auto-reply you can respond to.
     </div>
     <br>
+    </div>
 
     <div class="disclaimer">
         <strong>Before you continue:</strong>
@@ -251,11 +267,29 @@ document.getElementById('nonce-toggle').addEventListener('change', function() {{
         info.classList.remove('active');
     }}
 }});
+
+document.getElementById('pipe-toggle').addEventListener('change', function() {{
+    const pipeFields = document.getElementById('pipe-fields');
+    const singleOptions = document.getElementById('single-agent-options');
+    const emailLabel = document.getElementById('email-label');
+    const addrB = document.getElementById('address_b');
+    if (this.checked) {{
+        pipeFields.style.display = 'block';
+        singleOptions.style.display = 'none';
+        emailLabel.textContent = 'Your email (CC\\'d on all messages):';
+        addrB.required = true;
+    }} else {{
+        pipeFields.style.display = 'none';
+        singleOptions.style.display = 'block';
+        emailLabel.textContent = 'Your email (the one allowed contact):';
+        addrB.required = false;
+    }}
+}});
 </script>
 </body></html>"""
 
 
-# Step 4: Create agent
+# Step 4: Create agent (or agent pair in pipe mode)
 @router.post("/setup")
 async def create_agent(request: Request):
     user_id = get_user_id(request)
@@ -264,6 +298,7 @@ async def create_agent(request: Request):
     form = await request.form()
     address = form["address"].lower().strip()
     allowed_contact = form["allowed_contact"].strip()
+    pipe_mode = form.get("pipe_mode", "") == "1"
     nonce_enabled = form.get("nonce_enabled", "") == "1"
     heartbeat_enabled = form.get("heartbeat_enabled", "") == "1"
 
@@ -282,6 +317,142 @@ async def create_agent(request: Request):
     count = await pool.fetchval(
         "SELECT COUNT(*) FROM agents WHERE user_id = $1", user_id
     )
+
+    # --- PIPE MODE: create agent pair ---
+    if pipe_mode:
+        address_b = form.get("address_b", "").lower().strip()
+        if not address_b or not re.match(r"^[a-z0-9\-]{3,30}$", address_b):
+            raise HTTPException(status_code=400, detail="Invalid second agent address format")
+        if address == address_b:
+            raise HTTPException(status_code=400, detail="Agent addresses must be different")
+        if count >= 4:
+            raise HTTPException(status_code=400, detail="Not enough agent slots (need 2, max 5 per account)")
+
+        cc_email = allowed_contact  # User's email becomes the CC
+        contact_a = f"{address_b}@{settings.mail_domain}"
+        contact_b = f"{address}@{settings.mail_domain}"
+
+        # Create agent A
+        try:
+            agent_a = await pool.fetchrow(
+                """
+                INSERT INTO agents (user_id, address, allowed_contact, credit_balance, nonce_enabled,
+                    heartbeat_enabled, admin_approved, cc_email)
+                VALUES ($1, $2, $3, 10000, FALSE, FALSE, TRUE, $4)
+                RETURNING id
+                """,
+                user_id, address, contact_a, cc_email,
+            )
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Address '{address}' already taken")
+
+        # Create agent B
+        try:
+            agent_b = await pool.fetchrow(
+                """
+                INSERT INTO agents (user_id, address, allowed_contact, credit_balance, nonce_enabled,
+                    heartbeat_enabled, admin_approved, cc_email)
+                VALUES ($1, $2, $3, 10000, FALSE, FALSE, TRUE, $4)
+                RETURNING id
+                """,
+                user_id, address_b, contact_b, cc_email,
+            )
+        except Exception:
+            # Clean up agent A if B fails
+            await pool.execute("DELETE FROM agents WHERE id = $1", agent_a["id"])
+            raise HTTPException(status_code=400, detail=f"Address '{address_b}' already taken")
+
+        # Log credit grants
+        await pool.execute(
+            "INSERT INTO credit_transactions (agent_id, amount, reason) VALUES ($1, $2, $3)",
+            agent_a["id"], 10000, "free_signup",
+        )
+        await pool.execute(
+            "INSERT INTO credit_transactions (agent_id, amount, reason) VALUES ($1, $2, $3)",
+            agent_b["id"], 10000, "free_signup",
+        )
+
+        # Sync both to KV (nonce disabled for pipe agents)
+        await _sync_agent_to_kv(address, contact_a, False, admin_approved=True)
+        await _sync_agent_to_kv(address_b, contact_b, False, admin_approved=True)
+
+        # Notify Eric
+        try:
+            await send_email(
+                from_address=f"noreply@{settings.mail_domain}",
+                to_address="eterryphd@gmail.com",
+                subject=f"[sixel.email] New agent pair: {address} <-> {address_b}",
+                body=(
+                    f"New agent-to-agent pipe created:\n\n"
+                    f"Agent A: {address}@{settings.mail_domain}\n"
+                    f"Agent B: {address_b}@{settings.mail_domain}\n"
+                    f"CC (monitoring): {cc_email}\n"
+                ),
+            )
+        except Exception:
+            logger.warning("Failed to send signup notification for pipe %s <-> %s", address, address_b)
+
+        # Generate API keys for both
+        key_a, hash_a, prefix_a = generate_api_key()
+        await pool.execute(
+            "INSERT INTO api_keys (agent_id, key_hash, key_prefix) VALUES ($1, $2, $3)",
+            agent_a["id"], hash_a, prefix_a,
+        )
+        key_b, hash_b, prefix_b = generate_api_key()
+        await pool.execute(
+            "INSERT INTO api_keys (agent_id, key_hash, key_prefix) VALUES ($1, $2, $3)",
+            agent_b["id"], hash_b, prefix_b,
+        )
+
+        config_a = (
+            f"You have an email channel for talking to {address_b}.\\n"
+            f"API: {settings.api_base_url}/v1\\n"
+            f"Token: {key_a}\\n"
+            f"Use POST /v1/send to send a message. Use GET /v1/inbox to check for replies.\\n"
+            f"Poll /v1/inbox every 60 seconds while waiting."
+        )
+        config_b = (
+            f"You have an email channel for talking to {address}.\\n"
+            f"API: {settings.api_base_url}/v1\\n"
+            f"Token: {key_b}\\n"
+            f"Use POST /v1/send to send a message. Use GET /v1/inbox to check for replies.\\n"
+            f"Poll /v1/inbox every 60 seconds while waiting."
+        )
+
+        import html as html_mod
+        return HTMLResponse(f"""<!DOCTYPE html>
+<html><head><title>Sixel-Mail - Agent Pair Created</title>
+<style>
+    body {{ font-family: monospace; max-width: 600px; margin: 40px auto; padding: 0 20px; }}
+    button {{ font-family: monospace; font-size: 16px; cursor: pointer; background: #000; color: #fff; border: none; padding: 10px 20px; margin: 8px 4px; }}
+    code, pre {{ background: #f0f0f0; padding: 2px 6px; }}
+    pre {{ white-space: pre-wrap; padding: 12px; }}
+</style></head>
+<body>
+<h1>sixel.email</h1>
+<h2>Agent-to-agent pipe created</h2>
+<p>{html_mod.escape(address)}@sixel.email &harr; {html_mod.escape(address_b)}@sixel.email</p>
+<p>10,000 free messages each. CC: {html_mod.escape(cc_email)}</p>
+
+<div style="background: #f0f7ff; border: 1px solid #cce0ff; padding: 16px; margin: 16px 0;">
+    <strong>{html_mod.escape(address)}@sixel.email</strong> &mdash; give this to agent A:<br><br>
+    <code>{key_a}</code><br><br>
+    <pre>{config_a}</pre>
+</div>
+
+<div style="background: #fff7f0; border: 1px solid #ffcc99; padding: 16px; margin: 16px 0;">
+    <strong>{html_mod.escape(address_b)}@sixel.email</strong> &mdash; give this to agent B:<br><br>
+    <code>{key_b}</code><br><br>
+    <pre>{config_b}</pre>
+</div>
+
+<p>Messages are routed internally (instant delivery, no external email).
+You'll receive copies of all messages at {html_mod.escape(cc_email)}.</p>
+
+<a href="/account"><button>Go to dashboard</button></a>
+</body></html>""")
+
+    # --- SINGLE AGENT MODE (existing behavior) ---
     if count >= 5:
         raise HTTPException(status_code=400, detail="Maximum 5 agents per account")
 
