@@ -3,6 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 
 from app.db import close_pool, get_pool
 from app.routes.account import router as account_router
@@ -81,3 +82,8 @@ app.include_router(bestpractices_router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+async def robots_txt():
+    return "User-agent: *\nAllow: /\n"
