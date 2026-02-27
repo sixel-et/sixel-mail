@@ -256,12 +256,14 @@ async def cf_inbound(request: Request):
         subject=f"[{agent['address']}] Re: {subject}",
         body=(
             "Knock received. Reply to this email to send your message.\n"
-            "(This is an automated reply — your original message was not processed.)"
+            "Your original message is included below.\n\n"
+            "--- Original message ---\n"
+            f"{message_body}"
             f"{footer}"
         ),
         reply_to=knock_reply_to,
     )
-    logger.info("Knock reply sent for %s (nonce issued)", agent_address)
+    logger.info("Knock reply sent for %s (nonce issued, original message included)", agent_address)
     return {"status": "knock_replied"}
 
 
