@@ -59,15 +59,15 @@ At 100k users polling every 60s:
 
 ## What's Next
 
-1. **Nonce expiry bounce-back** — Eric request: when expired nonce used, bounce the original message back to sender with a new nonce. Touches CF Worker and/or webhook. Not yet implemented.
-2. **OpenClaw — monitor adoption** — Skill v1.0.6 on ClawHub. Tags (heartbeat, deadman-switch, watchdog, etc.) not yet added — requires resubmit + security review. Auto-approve enabled, Eric gets notification emails.
-3. **OpenClaw — expand visibility** — HN blocked (Starlink CGNAT). Discord timeout (24h, expires ~Feb 27). Reddit subs (r/ClaudeAI, r/LocalLLaMA) not yet posted.
-4. **clawhub CLI installed** — at `/home/sixel/.npm-global/bin/clawhub`. Eric publishes via ClawHub web UI.
-5. **Nonce cleanup** — Periodic cleanup of expired/burned nonces (not yet implemented).
-6. **Stripe / donate mechanism** — sustainability valve, not a gate. Add after adoption, not before.
-7. **Scale reactively** — SES migration when Resend 3k/month hits. Fly machines when CPU hits. Postgres when connections hit.
+1. **OpenClaw — monitor adoption** — Skill v1.0.6 on ClawHub. Tags (heartbeat, deadman-switch, watchdog, etc.) not yet added — requires resubmit + security review. Auto-approve enabled, Eric gets notification emails.
+2. **OpenClaw — expand visibility** — HN blocked (Starlink CGNAT). Discord timeout (24h, expires ~Feb 27). Reddit subs (r/ClaudeAI, r/LocalLLaMA) not yet posted.
+3. **clawhub CLI installed** — at `/home/sixel/.npm-global/bin/clawhub`. Eric publishes via ClawHub web UI.
+4. **Nonce cleanup** — Periodic cleanup of expired/burned nonces (not yet implemented).
+5. **Stripe / donate mechanism** — sustainability valve, not a gate. Add after adoption, not before.
+6. **Scale reactively** — SES migration when Resend 3k/month hits. Fly machines when CPU hits. Postgres when connections hit.
 
 Done recently:
+- ~~Nonce expiry bounce-back~~ — (2026-02-27) Expired nonce now bounces original message back to sender with fresh nonce. `check_nonce_expired()` in nonce.py, bounce logic in webhooks.py. Rate-limited via knock rate limiter. Deployed.
 - ~~Auto-approve signups~~ — (2026-02-26) Removed admin approval gate. New signups auto-approved. Eric gets notification email. Migration 019. Deployed.
 - ~~SKILL.md v1.0.4~~ — (2026-02-24) All 21 krill feedback items applied. Eric reviewed each individually.
 - ~~OpenClaw launch~~ — (2026-02-24) Landing page: security section, inbound constraint, "works with" line. Corrected skill package built + published to ClawHub. Discord post in OpenClaw community.
