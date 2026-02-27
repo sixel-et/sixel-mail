@@ -12,7 +12,7 @@ from app.config import settings
 from app.db import get_pool
 from app.services.credits import add_credits, deduct_credit
 from app.services.email import build_footer, send_email
-from app.services.nonce import build_reply_to, generate_nonce, validate_nonce
+from app.services.nonce import build_reply_to, check_nonce_expired, generate_nonce, validate_nonce
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks")
@@ -180,7 +180,35 @@ async def cf_inbound(request: Request):
     if nonce_str:
         validated_agent_id = await validate_nonce(pool, nonce_str)
         if validated_agent_id is None:
-            logger.info("Invalid/expired nonce from %s for %s", from_addr, agent_address)
+            # Check if nonce was valid but expired — bounce original message back
+            expired_agent_id = await check_nonce_expired(pool, nonce_str)
+            if expired_agent_id and expired_agent_id == agent_id:
+                if not _check_knock_rate(agent_id):
+                    logger.warning("Expired-nonce bounce rate limited for %s", agent_address)
+                    return {"status": "dropped", "reason": "bounce_rate_limited"}
+
+                fresh_nonce = await generate_nonce(pool, agent_id)
+                bounce_reply_to = build_reply_to(agent["address"], fresh_nonce)
+                from_email = f"{agent['address']}@{settings.mail_domain}"
+                footer = build_footer(agent["address"], agent["credit_balance"])
+
+                await send_email(
+                    from_address=from_email,
+                    to_address=agent["allowed_contact"],
+                    subject=f"[{agent['address']}] Re: {subject}",
+                    body=(
+                        "Your nonce expired. Reply to this email to resend your message.\n"
+                        "Your original message is included below.\n\n"
+                        "--- Original message ---\n"
+                        f"{message_body}"
+                        f"{footer}"
+                    ),
+                    reply_to=bounce_reply_to,
+                )
+                logger.info("Expired nonce bounce sent for %s (fresh nonce issued)", agent_address)
+                return {"status": "nonce_expired_bounced"}
+
+            logger.info("Invalid nonce from %s for %s", from_addr, agent_address)
             return {"status": "dropped", "reason": "invalid_nonce"}
 
         if validated_agent_id != agent_id:

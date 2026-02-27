@@ -15,7 +15,7 @@ Working:
 - Dashboard with key rotation at /account
 - API (send/inbox/rotate-key), heartbeat monitoring, rate limiting
 - Admin panel at /admin/ (stats, agent management, credit grants, bulk actions — Eric-only)
-- **Admin approval gate**: new accounts disabled by default. Eric approves from /admin/. 3-layer enforcement: CF Worker, webhook, send API.
+- **Auto-approve signups**: new accounts auto-approved (migration 019). Eric gets notification email on each signup. Admin can still revoke from /admin/. Approval checks remain in CF Worker, webhook, and send API for manual disable.
 - Email sending via Resend (built on SES, DKIM verified)
 - Email receiving via Cloudflare Email Routing → Worker → webhook
 - **Attachments**: send (base64 in POST /v1/send) and receive (metadata in inbox, download endpoint). 10MB/10 files limit.
@@ -59,13 +59,18 @@ At 100k users polling every 60s:
 
 ## What's Next
 
-1. **OpenClaw launch** — next 24 hours. claude-web leading strategy. Admin approval gate stays ON until ~100 users, then flip to auto-approve.
-2. ~~**Rotate sixel API key**~~ — Done 2026-02-23. Old key invalidated.
-3. **Nonce cleanup** — Periodic cleanup of expired/burned nonces (not yet implemented).
-4. **Stripe / donate mechanism** — sustainability valve, not a gate. Add after adoption, not before.
-5. **Scale reactively** — SES migration when Resend 3k/month hits. Fly machines when CPU hits. Postgres when connections hit.
+1. **Nonce expiry bounce-back** — Eric request: when expired nonce used, bounce the original message back to sender with a new nonce. Touches CF Worker and/or webhook. Not yet implemented.
+2. **OpenClaw — monitor adoption** — Skill v1.0.6 on ClawHub. Tags (heartbeat, deadman-switch, watchdog, etc.) not yet added — requires resubmit + security review. Auto-approve enabled, Eric gets notification emails.
+3. **OpenClaw — expand visibility** — HN blocked (Starlink CGNAT). Discord timeout (24h, expires ~Feb 27). Reddit subs (r/ClaudeAI, r/LocalLLaMA) not yet posted.
+4. **clawhub CLI installed** — at `/home/sixel/.npm-global/bin/clawhub`. Eric publishes via ClawHub web UI.
+5. **Nonce cleanup** — Periodic cleanup of expired/burned nonces (not yet implemented).
+6. **Stripe / donate mechanism** — sustainability valve, not a gate. Add after adoption, not before.
+7. **Scale reactively** — SES migration when Resend 3k/month hits. Fly machines when CPU hits. Postgres when connections hit.
 
 Done recently:
+- ~~Auto-approve signups~~ — (2026-02-26) Removed admin approval gate. New signups auto-approved. Eric gets notification email. Migration 019. Deployed.
+- ~~SKILL.md v1.0.4~~ — (2026-02-24) All 21 krill feedback items applied. Eric reviewed each individually.
+- ~~OpenClaw launch~~ — (2026-02-24) Landing page: security section, inbound constraint, "works with" line. Corrected skill package built + published to ClawHub. Discord post in OpenClaw community.
 - ~~Heartbeat cache default + AND semantics fix~~ — (2026-02-24) Cache default `0` suppressed writes for 10min after Fly VM boot (`time.monotonic()` starts at 0). AND condition stored `now()` instead of observed `last_seen_at` value. Both fixed. See notebook (sixel-reviewer entry).
 - ~~Heartbeat AND-logic + daily cap + advisory lock fix~~ — (2026-02-23) Eliminated beat-frequency false positives. Global 80/day email cap. Watchdog C-c bug fixed.
 - ~~Allstop fix + credit ordering + API key rotation~~ — (2026-02-23) Allstop via email was silently broken. Credits now checked before send, deducted after.

@@ -52,6 +52,27 @@ async def validate_nonce(pool: asyncpg.Pool, nonce_str: str) -> str | None:
     return str(row["agent_id"])
 
 
+async def check_nonce_expired(pool: asyncpg.Pool, nonce_str: str) -> str | None:
+    """Check if a nonce exists but is expired. Returns agent_id if expired, None otherwise.
+
+    Burns the expired nonce so it can't be checked again.
+    """
+    row = await pool.fetchrow(
+        """
+        UPDATE nonces
+        SET burned = TRUE, burned_at = now()
+        WHERE nonce = $1
+          AND burned = FALSE
+          AND expires_at <= now()
+        RETURNING agent_id
+        """,
+        nonce_str,
+    )
+    if row is None:
+        return None
+    return str(row["agent_id"])
+
+
 def build_reply_to(agent_address: str, nonce: str) -> str:
     """Build reply-to address with nonce: agent+nonce@domain."""
     return f"{agent_address}+{nonce}@{settings.mail_domain}"
