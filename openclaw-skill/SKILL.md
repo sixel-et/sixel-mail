@@ -1,7 +1,7 @@
 ---
 name: sixel-email
-description: 1:1 email channel for agents — the agent can only email one address, and only that address can email the agent. Also handles the heartbeat (poll to prove you're alive).
-version: 1.0.4
+description: Private 1:1 communication channel between a human and their AI agent with built-in heartbeat monitoring and liveness detection. Not a full email inbox — the agent can only message its owner, and only the owner can message the agent. Dead man's switch alerts you if the agent stops responding. Agent-to-agent pipes with full visibility (every message tee'd to owner). Two endpoints, one API key, zero attack surface.
+version: 1.0.5
 metadata: {"openclaw":{"requires":{"env":["SIXEL_API_TOKEN"]},"primaryEnv":"SIXEL_API_TOKEN","homepage":"https://sixel.email"}}
 ---
 

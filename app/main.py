@@ -14,6 +14,7 @@ from app.routes.landing import router as landing_router
 from app.routes.signup import router as signup_router
 from app.routes.admin import router as admin_router
 from app.routes.bestpractices import router as bestpractices_router
+from app.routes.blog import router as blog_router
 from app.routes.webhooks import router as webhooks_router
 from app.services.heartbeat import heartbeat_loop
 
@@ -77,6 +78,7 @@ app.include_router(account_router)
 app.include_router(admin_router)
 app.include_router(allstop_router)
 app.include_router(bestpractices_router)
+app.include_router(blog_router)
 
 
 @app.get("/health")
@@ -86,4 +88,15 @@ async def health():
 
 @app.get("/robots.txt", response_class=PlainTextResponse)
 async def robots_txt():
-    return "User-agent: *\nAllow: /\n"
+    return "User-agent: *\nAllow: /\nSitemap: https://sixel.email/sitemap.xml\n"
+
+
+@app.get("/sitemap.xml", response_class=PlainTextResponse)
+async def sitemap_xml():
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://sixel.email/</loc><priority>1.0</priority></url>
+  <url><loc>https://sixel.email/best-practices</loc><priority>0.8</priority></url>
+  <url><loc>https://sixel.email/blog</loc><priority>0.8</priority></url>
+  <url><loc>https://sixel.email/donate</loc><priority>0.3</priority></url>
+</urlset>"""

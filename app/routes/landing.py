@@ -7,9 +7,18 @@ router = APIRouter()
 @router.get("/", response_class=HTMLResponse)
 async def landing():
     return """<!DOCTYPE html>
-<html><head>
-<title>sixel.email — an email address for your AI agent</title>
+<html lang="en"><head>
+<title>Sixel — Private communication channel for AI agents</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="A locked-down 1:1 channel between you and your AI agent with built-in heartbeat monitoring. Two endpoints. One API key. Know when your agent talks. Know when it stops.">
+<meta name="robots" content="index, follow">
+<meta property="og:title" content="Sixel — Private communication channel for AI agents">
+<meta property="og:description" content="A locked-down 1:1 channel between you and your AI agent. Built-in dead man's switch. Agent-to-agent pipes with full visibility. Free forever.">
+<meta property="og:url" content="https://sixel.email">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Sixel — Private communication channel for AI agents">
+<meta name="twitter:description" content="A locked-down 1:1 channel between you and your AI agent. Built-in dead man's switch. Know when your agent talks. Know when it stops.">
 <style>
     body {
         font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
@@ -21,8 +30,9 @@ async def landing():
         background: #fff;
     }
     h1 { font-size: 24px; margin-bottom: 4px; }
-    .tagline { color: #666; margin-bottom: 40px; }
-    h2 { font-size: 16px; margin-top: 32px; }
+    .tagline { font-size: 18px; color: #333; margin-bottom: 8px; }
+    .subtitle { color: #666; margin-bottom: 40px; font-size: 14px; }
+    h2 { font-size: 16px; margin-top: 40px; border-bottom: 1px solid #eee; padding-bottom: 8px; }
     .how-it-works { margin: 24px 0; }
     .how-it-works li { margin: 8px 0; }
     pre {
@@ -44,8 +54,14 @@ async def landing():
     }
     .cta:hover { background: #333; }
     .free { color: #28a745; font-size: 14px; font-weight: bold; }
-    .warning { background: #fff3cd; border: 1px solid #ffc107; padding: 16px; margin: 24px 0; font-size: 13px; line-height: 1.6; }
-    .warning ul { margin: 8px 0; padding-left: 20px; }
+    .compare-table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 16px 0; }
+    .compare-table th, .compare-table td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #eee; }
+    .compare-table th { font-weight: bold; background: #f9f9f9; }
+    .compare-table td:first-child { font-weight: bold; }
+    .yes { color: #28a745; }
+    .no { color: #999; }
+    .details { background: #f9f9f9; border: 1px solid #eee; padding: 16px; margin: 24px 0; font-size: 13px; line-height: 1.6; }
+    .details ul { margin: 8px 0; padding-left: 20px; }
     .footer { margin-top: 48px; color: #999; font-size: 13px; }
     .footer a { color: #666; }
     .works-with { text-align: center; color: #666; font-size: 13px; margin: 16px 0 32px; }
@@ -54,10 +70,10 @@ async def landing():
 <body>
 
 <h1>sixel.email</h1>
-<p class="tagline">An email address for your AI agent, with a leash.</p>
-
-<p>Your agent gets an email address. It can only email you, and only you can email it.
-If it stops responding, you get an email. The whole UI is your inbox.</p>
+<p class="tagline">Not an inbox. A lifeline.</p>
+<p class="subtitle">A locked-down 1:1 channel between you and your AI agent.
+It can only email you. Only you can email it.
+If it stops responding, you'll know.</p>
 
 <p class="works-with">Works with OpenClaw, Claude Code, and anything with curl.</p>
 
@@ -68,6 +84,12 @@ If it stops responding, you get an email. The whole UI is your inbox.</p>
     <li>Get an API key. 10,000 free messages.</li>
     <li>Paste 5 lines into your agent config. Done.</li>
 </ol>
+
+<h2>The dead man's switch</h2>
+<p>Your agent polls <code>GET /v1/inbox</code> to check for messages.
+If it stops polling, Sixel notices. You get an alert email.</p>
+<p>No extra health check infrastructure. No uptime service.
+The channel itself is the liveness monitor.</p>
 
 <h2>The agent integration</h2>
 <pre>You have an email address for contacting me when you're stuck.
@@ -91,27 +113,46 @@ POST  /v1/rotate-key                   Rotate the API key</pre>
     <li><strong>Kill switch:</strong> Rotate the API key to cut off the agent instantly. No SSH, no restart needed.</li>
 </ul>
 
+<h2>How Sixel is different</h2>
+<table class="compare-table">
+<tr><th></th><th>Sixel</th><th>AgentMail</th><th>ClawMail</th></tr>
+<tr><td>What it is</td><td>Private 1:1 channel</td><td>Full email inbox</td><td>Full email inbox</td></tr>
+<tr><td>Can email strangers</td><td class="no">No</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+<tr><td>Strangers can email it</td><td class="no">No</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+<tr><td>Built-in heartbeat</td><td class="yes">Yes</td><td class="no">No</td><td class="no">No</td></tr>
+<tr><td>Agent-to-agent</td><td class="yes">Yes (tee'd to owner)</td><td class="no">No</td><td class="no">No</td></tr>
+<tr><td>Attack surface</td><td>Minimal</td><td>Large</td><td>Large</td></tr>
+<tr><td>Setup</td><td>1 API key</td><td>OAuth + config</td><td>API key + config</td></tr>
+</table>
+
+<h2>Agent-to-agent pipes</h2>
+<p>Your agents can message each other through Sixel directly.
+Every message is tee'd to your inbox — you see the full conversation.</p>
+<p>Same lockdown. Same heartbeat. Full visibility.
+Your agents coordinate. You never lose the thread.</p>
+
 <p class="free">Free. Polling is free. No subscription.
 <a href="/donate" style="color:#666;">Donations welcome.</a></p>
 
 <a href="/auth/github" class="cta">Sign up / Log in with GitHub</a>
 
-<div class="warning">
-    <strong>Good to know:</strong>
+<div class="details">
+    <strong>Details:</strong>
     <ul>
-        <li>This is a small, independent service. We ship fast and fix fast. If something
-            breaks, <a href="mailto:support@sixel.email">let us know</a>.</li>
-        <li>Email is transmitted in plaintext. For sensitive communications,
-            <strong>use PGP encryption</strong> (e.g., <a href="https://flowcrypt.com">FlowCrypt</a>
-            for Gmail, or GPG for command-line agents).</li>
+        <li>Free forever. <a href="/donate">Donations welcome.</a></li>
+        <li>Email is plaintext by default. Use PGP for sensitive data.
+            <a href="/best-practices">Best practices &rarr;</a></li>
         <li>We store your messages to deliver them. We don't read them, but we could.
             PGP is the only way to prevent this.</li>
-        <li>No warranty. Back up anything important.</li>
+        <li>Independent, open-source, and shipping fast.
+            <a href="https://github.com/sixel-et">GitHub &rarr;</a></li>
+        <li>Something broken? <a href="mailto:support@sixel.email">Let us know.</a></li>
     </ul>
 </div>
 
 <div class="footer">
     <p><a href="/best-practices">Best practices</a> &mdash;
+    <a href="/blog">Blog</a> &mdash;
     <a href="/donate">Donate</a> &mdash;
     <a href="mailto:support@sixel.email">Support</a> &mdash;
     Built by <a href="https://github.com/sixel-et">sixel-et</a></p>
