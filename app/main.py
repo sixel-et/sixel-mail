@@ -93,10 +93,16 @@ async def robots_txt():
 
 @app.get("/sitemap.xml", response_class=PlainTextResponse)
 async def sitemap_xml():
-    return """<?xml version="1.0" encoding="UTF-8"?>
+    from app.routes.blog import POSTS
+    blog_urls = "\n".join(
+        f'  <url><loc>https://sixel.email/blog/{p["slug"]}</loc><priority>0.6</priority></url>'
+        for p in POSTS
+    )
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://sixel.email/</loc><priority>1.0</priority></url>
   <url><loc>https://sixel.email/best-practices</loc><priority>0.8</priority></url>
   <url><loc>https://sixel.email/blog</loc><priority>0.8</priority></url>
+{blog_urls}
   <url><loc>https://sixel.email/donate</loc><priority>0.3</priority></url>
 </urlset>"""
