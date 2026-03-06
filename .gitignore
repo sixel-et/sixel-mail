@@ -7,3 +7,10 @@ dist/
 build/
 .pytest_cache/
 node_modules/
+
+# Internal operational documents (not for public consumption)
+Sixel's Notebook.md
+Sixel's Notes to Self.md
+sixel-mail.md
+sixel-mail economics.md
+security_problems_supabase_2-11-26.txt
