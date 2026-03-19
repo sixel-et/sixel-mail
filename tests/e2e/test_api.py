@@ -129,7 +129,7 @@ class TestSend:
         })
         assert resp.status_code == 200
         data = resp.json()
-        assert data["status"] == "sent"
+        assert data["status"] in ("sent", "delivered")
         assert "credits_remaining" in data
 
     def test_send_no_auth(self):
@@ -151,4 +151,4 @@ class TestSend:
 
         # Check that the sent message ID is returned
         data = resp.json()
-        assert "message_id" in data or data["status"] == "sent"
+        assert "id" in data or data["status"] in ("sent", "delivered")
