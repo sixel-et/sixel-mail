@@ -156,6 +156,8 @@ async def admin_dashboard(request: Request):
     <div class="stat"><div class="number">{total_credits_held}</div><div class="label">credits held</div></div>
 </div>
 
+<p><a href="/admin/owners">Owner config</a></p>
+
 <h2>All agents</h2>
 <form method="POST" action="/admin/bulk" id="bulk-form">
 <div style="margin:8px 0;display:flex;gap:8px;align-items:center;">
@@ -527,3 +529,116 @@ async def admin_delete_agent(agent_id: str, request: Request):
 
     logger.warning("Admin deleted agent %s", address)
     return RedirectResponse("/admin/?deleted=1", status_code=303)
+
+
+# --- Owner config ---
+
+@router.get("/owners", response_class=HTMLResponse)
+async def admin_owners(request: Request):
+    await _require_admin(request)
+    pool = await get_pool()
+
+    owners = await pool.fetch("""
+        SELECT u.id, u.github_username, u.email,
+               COUNT(a.id) as agent_count,
+               COALESCE(oc.max_agents, 5) as max_agents,
+               u.created_at
+        FROM users u
+        LEFT JOIN agents a ON a.user_id = u.id
+        LEFT JOIN owner_config oc ON oc.user_id = u.id
+        GROUP BY u.id, u.github_username, u.email, oc.max_agents, u.created_at
+        ORDER BY u.created_at DESC
+    """)
+
+    esc = html.escape
+    rows = ""
+    for o in owners:
+        rows += f"""
+        <tr>
+            <td><a href="/admin/owner/{o['id']}">{esc(o['github_username'])}</a></td>
+            <td>{esc(o['email'])}</td>
+            <td>{o['agent_count']} / {o['max_agents']}</td>
+            <td>{o['created_at'].strftime('%Y-%m-%d') if o['created_at'] else '?'}</td>
+        </tr>"""
+
+    flash = ""
+    if request.query_params.get("saved"):
+        flash = '<div class="flash">Owner config saved.</div>'
+
+    return f"""<!DOCTYPE html>
+<html><head><title>Owners - Sixel-Mail Admin</title>{STYLE}</head>
+<body>
+<h1><a href="/admin/">admin</a> / owners</h1>
+{flash}
+<table>
+    <tr><th>Owner</th><th>Email</th><th>Agents</th><th>Joined</th></tr>
+    {rows}
+</table>
+</body></html>"""
+
+
+@router.get("/owner/{user_id}", response_class=HTMLResponse)
+async def admin_owner_detail(user_id: str, request: Request):
+    await _require_admin(request)
+    pool = await get_pool()
+
+    user = await pool.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    config = await pool.fetchrow("SELECT * FROM owner_config WHERE user_id = $1", user_id)
+    max_agents = config["max_agents"] if config else 5
+
+    agents = await pool.fetch(
+        "SELECT address, credit_balance, last_seen_at, admin_approved FROM agents WHERE user_id = $1 ORDER BY created_at",
+        user_id,
+    )
+
+    esc = html.escape
+    agent_rows = ""
+    for a in agents:
+        approved = "yes" if a["admin_approved"] else "PENDING"
+        agent_rows += f"<tr><td>{esc(a['address'])}@sixel.email</td><td>{a['credit_balance']}</td><td>{approved}</td></tr>"
+
+    return f"""<!DOCTYPE html>
+<html><head><title>{esc(user['github_username'])} - Sixel-Mail Admin</title>{STYLE}</head>
+<body>
+<h1><a href="/admin/">admin</a> / <a href="/admin/owners">owners</a> / {esc(user['github_username'])}</h1>
+
+<h2>Config</h2>
+<form method="POST" action="/admin/owner/{user_id}/config" style="display:flex;gap:8px;align-items:center;">
+    <label>Max agents: <input type="number" name="max_agents" value="{max_agents}" min="1" max="100"></label>
+    <button type="submit">Save</button>
+</form>
+
+<h2>Agents ({len(agents)} / {max_agents})</h2>
+<table>
+    <tr><th>Address</th><th>Credits</th><th>Approved</th></tr>
+    {agent_rows}
+</table>
+
+</body></html>"""
+
+
+@router.post("/owner/{user_id}/config")
+async def admin_update_owner_config(user_id: str, request: Request):
+    await _require_admin(request)
+    pool = await get_pool()
+
+    user = await pool.fetchrow("SELECT id FROM users WHERE id = $1", user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    form = await request.form()
+    max_agents = int(form.get("max_agents", 5))
+    if max_agents < 1 or max_agents > 100:
+        raise HTTPException(status_code=400, detail="max_agents must be 1-100")
+
+    await pool.execute("""
+        INSERT INTO owner_config (user_id, max_agents, updated_at)
+        VALUES ($1, $2, now())
+        ON CONFLICT (user_id) DO UPDATE SET max_agents = $2, updated_at = now()
+    """, user_id, max_agents)
+
+    logger.info("Admin set max_agents=%d for user %s", max_agents, user_id)
+    return RedirectResponse(f"/admin/owners?saved=1", status_code=303)

@@ -313,10 +313,15 @@ async def create_agent(request: Request):
 
     pool = await get_pool()
 
-    # Check agent limit (5 per user)
+    # Check agent limit (per-owner config, default 5)
     count = await pool.fetchval(
         "SELECT COUNT(*) FROM agents WHERE user_id = $1", user_id
     )
+    max_agents = await pool.fetchval(
+        "SELECT max_agents FROM owner_config WHERE user_id = $1", user_id
+    )
+    if max_agents is None:
+        max_agents = 5
 
     # --- PIPE MODE: create agent pair ---
     if pipe_mode:
@@ -325,8 +330,8 @@ async def create_agent(request: Request):
             raise HTTPException(status_code=400, detail="Invalid second agent address format")
         if address == address_b:
             raise HTTPException(status_code=400, detail="Agent addresses must be different")
-        if count >= 4:
-            raise HTTPException(status_code=400, detail="Not enough agent slots (need 2, max 5 per account)")
+        if count >= max_agents - 1:
+            raise HTTPException(status_code=400, detail=f"Not enough agent slots (need 2, max {max_agents} per account)")
 
         cc_email = allowed_contact  # User's email becomes the CC
         contact_a = f"{address_b}@{settings.mail_domain}"
@@ -453,8 +458,8 @@ You'll receive copies of all messages at {html_mod.escape(cc_email)}.</p>
 </body></html>""")
 
     # --- SINGLE AGENT MODE (existing behavior) ---
-    if count >= 5:
-        raise HTTPException(status_code=400, detail="Maximum 5 agents per account")
+    if count >= max_agents:
+        raise HTTPException(status_code=400, detail=f"Maximum {max_agents} agents per account")
 
     # Create agent with 10,000 free credits
     try:
