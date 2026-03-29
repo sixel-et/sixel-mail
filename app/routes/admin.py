@@ -590,20 +590,84 @@ async def admin_owner_detail(user_id: str, request: Request):
     max_agents = config["max_agents"] if config else 5
 
     agents = await pool.fetch(
-        "SELECT address, credit_balance, last_seen_at, admin_approved FROM agents WHERE user_id = $1 ORDER BY created_at",
+        "SELECT id, address, allowed_contact, credit_balance, admin_approved, nonce_enabled FROM agents WHERE user_id = $1 ORDER BY created_at",
         user_id,
     )
 
     esc = html.escape
+
+    # Build agent rows with editable allowed_contact
     agent_rows = ""
     for a in agents:
+        aid = str(a["id"])
+        addr = esc(a["address"])
+        contact = esc(a["allowed_contact"])
         approved = "yes" if a["admin_approved"] else "PENDING"
-        agent_rows += f"<tr><td>{esc(a['address'])}@sixel.email</td><td>{a['credit_balance']}</td><td>{approved}</td></tr>"
+        # Detect if this is a pipe (allowed_contact is another @sixel.email agent)
+        is_pipe = a["allowed_contact"].endswith(f"@{settings.mail_domain}")
+        pipe_badge = ' <span style="color:#0066cc;font-size:11px;">(pipe)</span>' if is_pipe else ""
+        agent_rows += f"""
+        <tr>
+            <td><a href="/admin/agent/{aid}">{addr}@sixel.email</a></td>
+            <td>
+                <form method="POST" action="/admin/owner/{user_id}/agent/{aid}/contact"
+                      style="display:flex;gap:4px;align-items:center;margin:0;">
+                    <input type="text" name="allowed_contact" value="{contact}"
+                           style="font-family:monospace;font-size:13px;padding:4px;width:220px;">
+                    <button type="submit" style="padding:4px 8px;font-size:12px;">Save</button>
+                </form>
+            </td>
+            <td>{a['credit_balance']}</td>
+            <td>{approved}{pipe_badge}</td>
+        </tr>"""
+
+    # Build agent pair options
+    agent_options = ""
+    for a in agents:
+        agent_options += f'<option value="{a["id"]}">{esc(a["address"])}</option>'
+
+    # Detect existing pairs
+    pairs_html = ""
+    seen_pairs = set()
+    for a in agents:
+        if a["allowed_contact"].endswith(f"@{settings.mail_domain}"):
+            peer_addr = a["allowed_contact"].replace(f"@{settings.mail_domain}", "")
+            peer = next((b for b in agents if b["address"] == peer_addr), None)
+            if peer and peer["allowed_contact"] == f"{a['address']}@{settings.mail_domain}":
+                pair_key = tuple(sorted([a["address"], peer["address"]]))
+                if pair_key not in seen_pairs:
+                    seen_pairs.add(pair_key)
+                    pairs_html += f'<li>{esc(a["address"])}@sixel.email &harr; {esc(peer["address"])}@sixel.email</li>'
+
+    pairs_section = ""
+    if pairs_html:
+        pairs_section = f"<h3>Active pairs</h3><ul>{pairs_html}</ul>"
+
+    flash = ""
+    if request.query_params.get("saved"):
+        flash = '<div class="flash">Owner config saved.</div>'
+    elif request.query_params.get("contact_saved"):
+        flash = '<div class="flash">Allowed contact updated.</div>'
+    elif request.query_params.get("linked"):
+        flash = '<div class="flash">Agents linked as pipe pair.</div>'
+
+    link_section = ""
+    if len(agents) >= 2:
+        link_section = f"""
+        <h3>Link agent pair</h3>
+        <form method="POST" action="/admin/owner/{user_id}/link" style="display:flex;gap:8px;align-items:center;">
+            <select name="agent_a">{agent_options}</select>
+            <span>&harr;</span>
+            <select name="agent_b">{agent_options}</select>
+            <button type="submit">Link</button>
+        </form>
+        <p style="font-size:12px;color:#666;">Sets each agent's allowed contact to the other. Both get synced to Cloudflare KV.</p>"""
 
     return f"""<!DOCTYPE html>
 <html><head><title>{esc(user['github_username'])} - Sixel-Mail Admin</title>{STYLE}</head>
 <body>
 <h1><a href="/admin/">admin</a> / <a href="/admin/owners">owners</a> / {esc(user['github_username'])}</h1>
+{flash}
 
 <h2>Config</h2>
 <form method="POST" action="/admin/owner/{user_id}/config" style="display:flex;gap:8px;align-items:center;">
@@ -613,11 +677,88 @@ async def admin_owner_detail(user_id: str, request: Request):
 
 <h2>Agents ({len(agents)} / {max_agents})</h2>
 <table>
-    <tr><th>Address</th><th>Credits</th><th>Approved</th></tr>
+    <tr><th>Address</th><th>Allowed contact</th><th>Credits</th><th>Status</th></tr>
     {agent_rows}
 </table>
 
+{pairs_section}
+{link_section}
+
 </body></html>"""
+
+
+@router.post("/owner/{user_id}/agent/{agent_id}/contact")
+async def admin_update_agent_contact(user_id: str, agent_id: str, request: Request):
+    await _require_admin(request)
+    pool = await get_pool()
+
+    agent = await pool.fetchrow(
+        "SELECT id, address, nonce_enabled, admin_approved, user_id FROM agents WHERE id = $1",
+        agent_id,
+    )
+    if not agent or str(agent["user_id"]) != user_id:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    form = await request.form()
+    new_contact = form.get("allowed_contact", "").strip().lower()
+    if not new_contact:
+        raise HTTPException(status_code=400, detail="Allowed contact cannot be empty")
+
+    await pool.execute(
+        "UPDATE agents SET allowed_contact = $1 WHERE id = $2",
+        new_contact, agent["id"],
+    )
+    await _sync_agent_to_kv(
+        agent["address"], new_contact, agent["nonce_enabled"],
+        admin_approved=agent["admin_approved"],
+    )
+    logger.info("Admin updated allowed_contact for %s to %s", agent["address"], new_contact)
+
+    return RedirectResponse(f"/admin/owner/{user_id}?contact_saved=1", status_code=303)
+
+
+@router.post("/owner/{user_id}/link")
+async def admin_link_agents(user_id: str, request: Request):
+    await _require_admin(request)
+    pool = await get_pool()
+
+    form = await request.form()
+    agent_a_id = form.get("agent_a", "").strip()
+    agent_b_id = form.get("agent_b", "").strip()
+
+    if not agent_a_id or not agent_b_id or agent_a_id == agent_b_id:
+        raise HTTPException(status_code=400, detail="Select two different agents")
+
+    agent_a = await pool.fetchrow(
+        "SELECT id, address, nonce_enabled, admin_approved, user_id FROM agents WHERE id = $1",
+        agent_a_id,
+    )
+    agent_b = await pool.fetchrow(
+        "SELECT id, address, nonce_enabled, admin_approved, user_id FROM agents WHERE id = $1",
+        agent_b_id,
+    )
+    if not agent_a or not agent_b:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if str(agent_a["user_id"]) != user_id or str(agent_b["user_id"]) != user_id:
+        raise HTTPException(status_code=403, detail="Both agents must belong to this owner")
+
+    contact_a = f"{agent_b['address']}@{settings.mail_domain}"
+    contact_b = f"{agent_a['address']}@{settings.mail_domain}"
+
+    await pool.execute("UPDATE agents SET allowed_contact = $1 WHERE id = $2", contact_a, agent_a["id"])
+    await pool.execute("UPDATE agents SET allowed_contact = $1 WHERE id = $2", contact_b, agent_b["id"])
+
+    await _sync_agent_to_kv(
+        agent_a["address"], contact_a, agent_a["nonce_enabled"],
+        admin_approved=agent_a["admin_approved"],
+    )
+    await _sync_agent_to_kv(
+        agent_b["address"], contact_b, agent_b["nonce_enabled"],
+        admin_approved=agent_b["admin_approved"],
+    )
+
+    logger.info("Admin linked agents %s <-> %s", agent_a["address"], agent_b["address"])
+    return RedirectResponse(f"/admin/owner/{user_id}?linked=1", status_code=303)
 
 
 @router.post("/owner/{user_id}/config")

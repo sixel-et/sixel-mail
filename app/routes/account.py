@@ -136,7 +136,13 @@ async def account_page(request: Request):
 <div style="border: 1px solid #ccc; padding: 16px; margin: 16px 0;">
     <h3>{address}@sixel.email{nonce_badge}{heartbeat_badge}{killswitch_badge}{allstop_badge}{pending_badge}</h3>
     <p>Status: {status} (last seen: {last_seen_str})</p>
-    <p>Allowed contact: {esc(agent['allowed_contact'])}</p>
+    <form method="POST" action="/account/set-contact" style="margin:8px 0;display:flex;gap:4px;align-items:center;">
+        <input type="hidden" name="agent_id" value="{agent_id}">
+        <label>Allowed contact:</label>
+        <input type="text" name="allowed_contact" value="{esc(agent['allowed_contact'])}"
+               style="font-family:monospace;font-size:13px;padding:4px;width:240px;">
+        <button type="submit" style="padding:4px 8px;font-size:12px;">Save</button>
+    </form>
     <p>CC email (tee): {cc_email_display}</p>
     <p>Credits: {agent['credit_balance']} messages</p>
     <p>API key: <code>{key_display}</code></p>
@@ -169,6 +175,36 @@ async def account_page(request: Request):
 </div>
 """
 
+    # Build link-agents section
+    link_section = ""
+    if len(agents) >= 2:
+        agent_options = "".join(
+            f'<option value="{a["id"]}">{esc(a["address"])}</option>' for a in agents
+        )
+        # Detect existing pairs
+        pairs_html = ""
+        seen_pairs = set()
+        for a in agents:
+            if a["allowed_contact"].endswith(f"@{settings.mail_domain}"):
+                peer_addr = a["allowed_contact"].replace(f"@{settings.mail_domain}", "")
+                peer = next((b for b in agents if b["address"] == peer_addr), None)
+                if peer and peer["allowed_contact"] == f"{a['address']}@{settings.mail_domain}":
+                    pair_key = tuple(sorted([a["address"], peer["address"]]))
+                    if pair_key not in seen_pairs:
+                        seen_pairs.add(pair_key)
+                        pairs_html += f'<li>{esc(a["address"])}@sixel.email &harr; {esc(peer["address"])}@sixel.email</li>'
+        if pairs_html:
+            link_section += f'<h3>Active pairs</h3><ul>{pairs_html}</ul>'
+        link_section += f"""
+<h3>Link agent pair</h3>
+<form method="POST" action="/account/link" style="display:flex;gap:8px;align-items:center;">
+    <select name="agent_a" style="font-family:monospace;font-size:14px;padding:6px;">{agent_options}</select>
+    <span>&harr;</span>
+    <select name="agent_b" style="font-family:monospace;font-size:14px;padding:6px;">{agent_options}</select>
+    <button type="submit">Link</button>
+</form>
+<p style="font-size:12px;color:#666;">Sets each agent's allowed contact to the other.</p>"""
+
     return f"""<!DOCTYPE html>
 <html><head><title>Sixel-Mail Account</title>
 <style>
@@ -180,6 +216,9 @@ async def account_page(request: Request):
 <h1>sixel.email — your account</h1>
 <p>{esc(user['github_username'])} ({esc(user['email'])})</p>
 {agent_sections}
+
+{link_section}
+
 <br>
 <a href="/setup"><button>+ Create another agent</button></a>
 </body></html>"""
@@ -470,6 +509,72 @@ async def update_cc_email(request: Request):
 
     await pool.execute(
         "UPDATE agents SET cc_email = $1 WHERE id = $2", cc_email, agent["id"]
+    )
+
+    return RedirectResponse("/account", status_code=303)
+
+
+@router.post("/account/set-contact")
+async def set_contact(request: Request):
+    """Lightweight contact update — just changes allowed_contact + syncs KV."""
+    form = await request.form()
+    pool, agent, user_id = await _get_verified_agent(request, form)
+    new_contact = form.get("allowed_contact", "").strip().lower()
+
+    if not new_contact:
+        raise HTTPException(status_code=400, detail="Allowed contact cannot be empty")
+
+    await pool.execute(
+        "UPDATE agents SET allowed_contact = $1 WHERE id = $2",
+        new_contact, agent["id"],
+    )
+    await _sync_agent_to_kv(
+        agent["address"], new_contact, agent.get("nonce_enabled", False),
+        admin_approved=agent.get("admin_approved", False),
+    )
+
+    return RedirectResponse("/account", status_code=303)
+
+
+@router.post("/account/link")
+async def link_agents(request: Request):
+    """Link two agents as a pipe pair — set each as the other's allowed contact."""
+    user_id = get_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    form = await request.form()
+    agent_a_id = form.get("agent_a", "").strip()
+    agent_b_id = form.get("agent_b", "").strip()
+
+    if not agent_a_id or not agent_b_id or agent_a_id == agent_b_id:
+        raise HTTPException(status_code=400, detail="Select two different agents")
+
+    pool = await get_pool()
+    agent_a = await pool.fetchrow(
+        "SELECT id, address, nonce_enabled, admin_approved, user_id FROM agents WHERE id = $1 AND user_id = $2",
+        agent_a_id, user_id,
+    )
+    agent_b = await pool.fetchrow(
+        "SELECT id, address, nonce_enabled, admin_approved, user_id FROM agents WHERE id = $1 AND user_id = $2",
+        agent_b_id, user_id,
+    )
+    if not agent_a or not agent_b:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    contact_a = f"{agent_b['address']}@{settings.mail_domain}"
+    contact_b = f"{agent_a['address']}@{settings.mail_domain}"
+
+    await pool.execute("UPDATE agents SET allowed_contact = $1 WHERE id = $2", contact_a, agent_a["id"])
+    await pool.execute("UPDATE agents SET allowed_contact = $1 WHERE id = $2", contact_b, agent_b["id"])
+
+    await _sync_agent_to_kv(
+        agent_a["address"], contact_a, agent_a["nonce_enabled"],
+        admin_approved=agent_a["admin_approved"],
+    )
+    await _sync_agent_to_kv(
+        agent_b["address"], contact_b, agent_b["nonce_enabled"],
+        admin_approved=agent_b["admin_approved"],
     )
 
     return RedirectResponse("/account", status_code=303)
